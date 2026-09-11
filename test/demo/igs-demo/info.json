@@ -1,0 +1,10 @@
+{
+  "name": "igs-demo",
+  "version": "0.0.1",
+  "title": "Inserter Ground Stack demo",
+  "author": "Sparr",
+  "contact": "sparr0@gmail.com",
+  "factorio_version": "2.1",
+  "description": "Builds a row of worked examples of what Inserter Ground Stack does, hands the player the research and a pocketful of things to experiment with, and stands them in front of it. For looking at the mod by hand; never published to the mod portal.",
+  "dependencies": [ "base", "inserter-ground-stack", "? quality", "? space-age" ]
+}

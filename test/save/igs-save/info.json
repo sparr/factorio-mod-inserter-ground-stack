@@ -1,0 +1,10 @@
+{
+  "name": "igs-save",
+  "version": "0.0.1",
+  "title": "Inserter Ground Stack save harness",
+  "author": "Sparr",
+  "contact": "sparr0@gmail.com",
+  "factorio_version": "2.1",
+  "description": "Builds a factory, saves it, and checks that the mod still knows about it after the save is loaded again. Never published to the mod portal.",
+  "dependencies": [ "base", "inserter-ground-stack" ]
+}

@@ -1,0 +1,12 @@
+{
+  "modPath": ".",
+  "mods": [
+    "recycler",
+    "quality",
+    "igs-tests"
+  ],
+  "test": {
+    "game_speed": 100,
+    "default_timeout": 36000
+  }
+}

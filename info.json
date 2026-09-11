@@ -1,0 +1,23 @@
+{
+  "name": "inserter-ground-stack",
+  "version": "0.1.0",
+  "title": "Inserter Ground Stack",
+  "author": "Sparr",
+  "homepage": "https://github.com/sparr/factorio-mod-inserter-ground-stack",
+  "contact": "sparr0@gmail.com",
+  "description": "Inserters make stacks on the ground instead of just single items, after researching belt stacking.",
+  "factorio_version": "2.1",
+  "dependencies": [
+    "base >= 2.1.0"
+  ],
+  "package": {
+    "ignore": [
+      "test/**",
+      "node_modules/**",
+      "package.json",
+      "package-lock.json",
+      "factorio-test.json",
+      "*.zip"
+    ]
+  }
+}

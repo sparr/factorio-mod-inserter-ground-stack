@@ -1,0 +1,9 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 2026-09-11
+  Features:
+    - An inserter putting something down where a stack of the same thing is already lying adds to that stack instead of stopping on it
+    - A bulk inserter empties its whole hand onto the ground rather than leaving all but the first item in it
+    - Ground stacks grow to the same depth the item stacks anywhere else, so a tile holds a hundred iron plates or ten barrels
+    - Eggs and anything else that hatches when it spoils are left alone, since a pile of them going off at once is a bigger bang than the game would ever have arranged
+    - Nothing happens until belt stacking has been researched
