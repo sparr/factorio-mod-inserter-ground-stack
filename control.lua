@@ -137,9 +137,6 @@ local NEVER_IN_THE_WAY = { "asteroid", "unit" }
 --- on the list the whole time, jammed, being offered a pile that is not there yet. The
 --- moment the tree falls it puts something down and the mod picks up from there, without
 --- anyone having had to tell it.
----
---- Which is worth filtering because they come and go in their thousands: a forest burning,
---- a field on Gleba being harvested by agricultural towers.
 local NEVER_LET_GO_OF = { "plant", "tree" }
 
 --- Both lists at once, to ask about one entity at a time.
@@ -600,26 +597,21 @@ local function reconsider()
   end
 end
 
----Forget everything and work it all out again from the world as it stands.
+---Forget everything and work the whole list out again from the world as it stands.
 ---
----What the mod's own remote interface offers, and what it does on a new game and after an
----update. Settling whether to be active at all is part of it: "read the world again" has to
----include reading whether anybody can stack things, or a save whose bonus arrived by
----console command would be told to rebuild a list it had decided not to keep.
-local function rebuild()
+---The way out of anything the mod failed to hear about -- a script that built an inserter
+---without raising an event, a mod that re-aimed one in a way nothing here knows to listen
+---for -- and what it does for itself on a new game and after an update. It is the same work
+---as when belt stacking is researched, so it costs the same long tick and no more.
+---
+---Clearing storage.active is what makes it happen rather than a way of saying it did:
+---read_everything only runs when reconsider finds the answer has changed. Settling whether
+---to be active at all is properly part of the job, since "read the world again" has to
+---include reading whether anybody can stack things -- a save whose bonus arrived by console
+---command would otherwise be told to make a list it had decided not to keep.
+local function refreshData()
   storage.active = nil
   reconsider()
-end
-
----Read the whole world again, now.
----
----What the mod's own remote interface and its console command offer, and the way out of
----anything this mod failed to hear about: a script that built an inserter without raising
----an event, a mod that re-aimed one in a way nothing here knows to listen for. It is the
----same work the mod does for itself when belt stacking is researched, so it costs the same
----long tick and no more.
-local function refreshData()
-  rebuild()
 end
 
 ---@param event EventData.on_built_entity|EventData.on_robot_built_entity|EventData.on_player_rotated_entity
@@ -735,13 +727,13 @@ local function onInit()
   storage.busy = {}
   storage.due = {}
   storage.pending = {}
-  rebuild()
+  refreshData()
 end
 
 local function onConfigurationChanged()
   -- read the world again rather than trusting what was stored, since an update may have
   -- changed the shape of what is stored -- but only if there is any reason to have a list
-  rebuild()
+  refreshData()
 end
 
 script.on_init(onInit)
