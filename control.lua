@@ -5,6 +5,7 @@
 ---@field busy { [uint]: uint } the tick each of those was last topped up on, for the ones that recently were
 ---@field due { [uint]: uint } the soonest tick each of those could possibly want looking at again
 ---@field pending { [uint]: LuaEntity } inserters to look at again once whatever was in their way has finished going
+---@field rescan { surface: uint?, at: uint, passes: uint }? how far the background reading of the map has got
 ---@field active boolean whether anybody in this game has researched belt stacking yet
 
 --- What an inserter says about itself when it has swung out, found the spot it puts things
@@ -44,6 +45,41 @@ local SOON = 0.75
 --- once: from then on it is in the busy set. A sixth of a second is below noticing and a
 --- tenth of what looking every tick would cost.
 local SWEEP_TICKS = 10
+
+--- What an inserter says when the spot it aims at is rail and a train is expected there.
+---
+--- It holds everything and puts nothing down, however long the wait, so it can never be the
+--- inserter this mod is for. On a factory built around trains this is the great majority of
+--- the inserters that have no drop target at all: measured on a real megabase, 5,397 of
+--- 6,020. They are let go of rather than carried, and found again by the ordinary means when
+--- the rail under them goes away.
+local WAITING_FOR_TRAIN = defines.entity_status.waiting_for_train
+
+--- How much the background reading does in a tick, counted in both chunks looked at and
+--- inserters found in them.
+---
+--- Reading a whole factory is the one expensive thing this mod does: on a megabase, doing it
+--- in a single tick took 4.9 seconds, which is a freeze rather than a hitch. A fixed amount
+--- of work a tick means the cost does not depend on the size of the map at all. What varies
+--- instead is how long a pass takes to come round -- about a minute on a large map, moments
+--- on a small one -- and that is the thing that can afford to vary.
+---
+--- Counted in entities as well as chunks because the two are not the same expense. A chunk
+--- of open ground is nothing; a chunk of a bus is hundreds of inserters, and a budget that
+--- counted only chunks would take all of them in one tick.
+local FIRST_PASS_BUDGET = 64
+
+--- And how much it does once it has been round once.
+---
+--- A crawl, because by then it is only a backstop. Everything that announces itself is dealt
+--- with the moment it happens: an inserter built, turned round or taken away, and a few
+--- tiles looked at again around anything else that is removed, which is how an inserter
+--- whose rail has gone is found. What is left for the reading to catch is a script that
+--- changed the map and said nothing, which is rare and never urgent.
+---
+--- One chunk a tick is a pass in seconds on a small map and about an hour on a megabase.
+--- The hour is the right answer: nothing is waiting on it.
+local IDLE_BUDGET = 1
 
 --- Things an inserter can put items into that the game does not count as buildings. Asked
 --- by type, because what matters is that a wagon or a car can be the thing an inserter was
@@ -194,7 +230,12 @@ end
 local function watch(entity)
   if not (entity and entity.valid and entity.type == "inserter") then return end
   local unit_number = entity.unit_number--[[@as uint]]
-  if entity.drop_target then
+  if entity.drop_target or entity.status == WAITING_FOR_TRAIN then
+    -- Turned away at the door rather than taken on and dropped at the next look. The
+    -- background reading comes past every inserter on the map again and again, and an
+    -- inserter aimed at rail that were let go of only afterwards would be taken on and
+    -- dropped once a pass for ever, which on a factory built around trains is thousands of
+    -- them churning in and out of the list to no purpose.
     forget(unit_number)
   else
     storage.droppers[unit_number] = entity
@@ -202,6 +243,11 @@ local function watch(entity)
     -- Anything that brings an inserter back through here has changed something about it,
     -- and turning one round moves both the spot it aims at and how far it has to turn to
     -- get there, so what was worked out for the old arrangement is worth nothing.
+    --
+    -- No settling wait before judging it, either. Taking the rail out from under an inserter
+    -- changes what it says about itself within the same tick, which test.ft.rails checks on
+    -- every phase of the sweep in turn, including the phase where it is found and judged in
+    -- one tick.
     storage.due[unit_number] = nil
   end
 end
@@ -239,7 +285,11 @@ local function top_up(unit_number, inserter)
   if not inserter.valid then forget(unit_number) return false, false end
   -- something has been built where its items used to land, so it is somebody else's problem
   if inserter.drop_target then forget(unit_number) return false, false end
-  if inserter.status ~= JAMMED then return false, false end
+  local status = inserter.status
+  -- Rail with a train coming to it. Nothing will ever be put down here, so this is not an
+  -- inserter worth carrying; the rail going away is what brings it back.
+  if status == WAITING_FOR_TRAIN then forget(unit_number) return false, false end
+  if status ~= JAMMED then return false, false end
 
   local held = inserter.held_stack
   if not held.valid_for_read then return false, false end
@@ -284,10 +334,121 @@ local function top_up(unit_number, inserter)
   return false, false
 end
 
+--- Where the background reading of the map has got to, which is deliberately not in
+--- storage. The iterator is a game object and storage has to survive being written to a
+--- file; keeping every chunk position instead was tens of thousands of numbers in every save
+--- on a large map. What is stored is how many chunks into the surface the reading is, which
+--- is enough to make the iterator again and wind it forward to the same place.
+---
+--- Wound forward rather than simply started again, because a save is loaded by a player
+--- joining a game everybody else is still playing. Starting afresh would have that player
+--- reading different chunks on different ticks from everyone else, and finding an inserter a
+--- tick sooner or later than they do is enough to put the game out of step.
+local walk
+
+---The surface to read after the one the state names.
+---@param state table
+---@return LuaSurface? surface
+---@return boolean wrapped whether that was the last of them and this is the first again
+local function next_surface(state)
+  local found, first
+  local past = false
+  for _, candidate in pairs(game.surfaces) do
+    if first == nil then first = candidate end
+    if past and found == nil then found = candidate end
+    if candidate.index == state.surface then past = true end
+  end
+  if found then return found, false end
+  return first, true
+end
+
+---Look at every inserter in a chunk.
+---@param surface LuaSurface
+---@param area BoundingBox
+---@return integer how many were found
+local function read_chunk(surface, area)
+  local found = 0
+  for _, inserter in pairs(surface.find_entities_filtered{ area = area, type = "inserter" }) do
+    found = found + 1
+    watch(inserter)
+  end
+  return found
+end
+
+---Read a slice of the map, a different slice each tick.
+---
+---Everything else this mod knows it was told: an inserter built, turned round, taken away.
+---Not everything that changes the answer is announced. A script may build an inserter
+---without raising anything, and an inserter let go of because it was aimed at rail comes
+---back only because the rail going away happens to be an event. A picture assembled purely
+---from events drifts, so this walks the map in the background for ever and puts it right.
+local function rescan_slice()
+  local state = storage.rescan
+  if state == nil then state = { at = 0, passes = 0 } storage.rescan = state end
+  -- quick until the map has been read once, a crawl for ever after
+  local budget = (state.passes or 0) > 0 and IDLE_BUDGET or FIRST_PASS_BUDGET
+
+  local surface = state.surface and game.surfaces[state.surface] or nil
+  if surface == nil or not surface.valid then
+    surface = next_surface(state)
+    if surface == nil then return end
+    state.surface = surface.index
+    state.at = 0
+  end
+
+  -- Made again whenever it is not the one the state describes: after a load, or after the
+  -- surface it was walking went away.
+  if walk == nil or walk.surface ~= state.surface or walk.at ~= state.at then
+    walk = { surface = state.surface, at = 0, iter = surface.get_chunks() }
+    while walk.at < state.at and walk.iter() ~= nil do walk.at = walk.at + 1 end
+    -- and if the surface has shrunk since, carry on from wherever that left off
+    state.at = walk.at
+  end
+
+  local left = budget
+  local wraps = 0
+  while left > 0 do
+    local chunk = walk.iter()
+    if chunk == nil then
+      -- that surface is done; on to the next, and round to the first when they run out
+      local wrapped
+      surface, wrapped = next_surface(state)
+      if surface == nil then break end
+      if wrapped then
+        state.passes = (state.passes or 0) + 1
+        wraps = wraps + 1
+        -- every surface there is holds no chunks at all, so there is nothing to read and
+        -- going round again would only find that out twice
+        if wraps > 1 then break end
+      end
+      state.surface = surface.index
+      state.at = 0
+      walk = { surface = state.surface, at = 0, iter = surface.get_chunks() }
+    else
+      walk.at = walk.at + 1
+      state.at = walk.at
+      left = left - 1 - read_chunk(surface, chunk.area)
+    end
+  end
+end
+
+---Forget every inserter and start the reading again from the top.
+local function begin_reading()
+  storage.droppers = {}
+  storage.busy = {}
+  storage.due = {}
+  storage.pending = {}
+  storage.rescan = { at = 0, passes = 0 }
+  walk = nil
+end
+
 ---@param event EventData.on_tick
 local function onTick(event)
   if not storage.active then return end
   local tick = event.tick
+
+  -- a slice of the map, read again in the background for ever
+  rescan_slice()
 
   -- Everything that was built, turned round, mined or blown up last tick. By now the
   -- engine has settled what each of these inserters is aimed at, which it had not when the
@@ -325,7 +486,7 @@ local function onTick(event)
   -- is found.
   if tick % SWEEP_TICKS == 0 then
     for unit_number, inserter in pairs(storage.droppers) do
-      if not storage.busy[unit_number] then
+      if not storage.busy[unit_number] and tick >= (storage.due[unit_number] or 0) then
         local moved, emptied = top_up(unit_number, inserter)
         if moved then
           storage.busy[unit_number] = tick
@@ -336,37 +497,6 @@ local function onTick(event)
   end
 end
 
----Everything on every surface matching the filter, a chunk at a time.
----
----Walking the chunks is most of what this costs -- fifty thousand of them on a large map --
----so it is only ever done when what is stored cannot be trusted.
----@param args LuaSurface.find_entities_filtered_param
----@return LuaEntity[]
-local function find_all_entities(args)
-  ---@type LuaEntity[]
-  local entities = {}
-  for _, surface in pairs(game.surfaces) do
-    for chunk in surface.get_chunks() do
-      local left, top = chunk.x * 32, chunk.y * 32
-      args.area = {{left, top}, {left + 32, top + 32}}
-      for _, entity in pairs(surface.find_entities_filtered(args)) do
-        entities[#entities + 1] = entity
-      end
-    end
-  end
-  return entities
-end
-
----Read the world again and build the list of watched inserters from scratch.
-local function refreshData()
-  storage.droppers = {}
-  storage.busy = {}
-  storage.due = {}
-  storage.pending = {}
-  for _, inserter in pairs(find_all_entities{type = "inserter"}) do
-    watch(inserter)
-  end
-end
 
 ---Decide whether this game has any use for the mod at all, and start or stop accordingly.
 ---
@@ -394,12 +524,16 @@ local function reconsider()
   if active == storage.active then return end
   storage.active = active
   if active then
-    refreshData()
+    -- begun rather than done: on a megabase reading the whole world in one tick is a five
+    -- second freeze, and a research finishing is no moment to inflict one
+    begin_reading()
   else
     storage.droppers = {}
     storage.busy = {}
     storage.due = {}
     storage.pending = {}
+    storage.rescan = nil
+    walk = nil
   end
 end
 
@@ -412,6 +546,22 @@ end
 local function rebuild()
   storage.active = nil
   reconsider()
+end
+
+---Read the whole world again, now, however long it takes.
+---
+---What the mod's own remote interface offers, because somebody who asks for it wants it
+---done rather than begun; everything the mod does of its own accord goes the slow way. On a
+---factory of any size this is a long tick, which is the price of asking for it.
+local function refreshData()
+  rebuild()
+  if not storage.active then return end
+  -- Every chunk of every surface at once. On a factory of any size this is a long tick,
+  -- which is the price of asking for it rather than letting the background reading come
+  -- round; the background reading carries on from the top afterwards either way.
+  for _, surface in pairs(game.surfaces) do
+    for chunk in surface.get_chunks() do read_chunk(surface, chunk.area) end
+  end
 end
 
 ---@param event EventData.on_built_entity|EventData.on_robot_built_entity|EventData.on_player_rotated_entity
@@ -516,7 +666,7 @@ script.on_event(defines.events.on_forces_merged, reconsider)
 ---would let anything holding the reference change what the mod is doing. Useful for asking
 ---a running game why nothing is happening, and it is how the save round trip test sees
 ---across the boundary between two sessions, since a mod's storage is its own.
----@return { active: boolean, watched: integer, busy: integer, pending: integer }
+---@return { active: boolean, passes: integer, watched: integer, busy: integer, pending: integer }
 local function report()
   local function count(t)
     local n = 0
@@ -525,6 +675,7 @@ local function report()
   end
   return {
     active = storage.active or false,
+    passes = storage.rescan and storage.rescan.passes or 0,
     watched = count(storage.droppers),
     busy = count(storage.busy),
     pending = count(storage.pending),
@@ -532,7 +683,7 @@ local function report()
 end
 
 remote.add_interface("inserter-ground-stack",
-                      {refreshData = rebuild, report = report}
+                      {refreshData = refreshData, report = report}
                     )
 
 -- igs-tests is never published, so this can never fire on a player's machine -- which
@@ -543,6 +694,7 @@ if script.active_mods["factorio-test"] and script.active_mods["igs-tests"] then
     "test.ft.research",
     "test.ft.limits",
     "test.ft.lifecycle",
+    "test.ft.rails",
     "test.ft.platforms",
     "test.ft.aquilo",
   }, {

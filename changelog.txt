@@ -7,3 +7,5 @@ Date: 2026-09-11
     - Ground stacks grow to the same depth the item stacks anywhere else, so a tile holds a hundred iron plates or ten barrels
     - Eggs and anything else that hatches when it spoils are left alone, since a pile of them going off at once is a bigger bang than the game would ever have arranged
     - Nothing happens until belt stacking has been researched
+    - Reading the factory when the research lands is spread over many ticks, so a large save carries on running rather than freezing for several seconds
+    - Inserters aimed at rail are not watched, since nothing can be put down on a rail; they are picked up again if the rail is removed

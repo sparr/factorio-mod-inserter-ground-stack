@@ -18,22 +18,28 @@ end)
 after_each(world.clear)
 
 describe("an inserter the mod never saw being built", function()
-  it("is left out until the mod is asked to read the world again", function()
+  it("is found by the reading that goes round the map anyway", function()
+    -- A script may build an inserter and raise nothing, which is allowed and which mods do.
+    -- Nothing tells this mod about such a one, so what finds it is the background reading
+    -- coming past its chunk. That is the whole reason the reading never stops.
     world.stacking(3)
     local inserter = world.rig(1, { quiet = true })
-    after_ticks(world.JAM, function()
-      assert.is_nil(storage.droppers[inserter.unit_number],
-        "an inserter that raised no build event was watched anyway")
-      assert.are.equal(1, world.piled(inserter),
-        "its pile grew, so something was watching it after all")
-      world.refresh()
+    after_ticks(world.SETTLE * 6, function()
       assert.is_not_nil(storage.droppers[inserter.unit_number],
-        "reading the world again did not find it")
+        "the reading went round the map and never found it")
     end)
-    after_ticks(world.JAM + world.SETTLE, function()
+    after_ticks(world.SETTLE * 8, function()
       assert.is_true(world.piled(inserter) > 1,
         "it was found but never topped up")
     end)
+  end)
+
+  it("is found at once when the mod is asked to read the world again", function()
+    world.stacking(3)
+    local inserter = world.rig(1, { quiet = true })
+    world.refresh()
+    assert.is_not_nil(storage.droppers[inserter.unit_number],
+      "reading the world again did not find it")
   end)
 end)
 
