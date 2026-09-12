@@ -91,6 +91,46 @@ describe("an inserter with somewhere to put things", function()
   end)
 end)
 
+describe("an inserter whose target drives away", function()
+  it("is not heard about, because nothing was removed", function()
+    -- A car parked where an inserter puts things down is a drop target like any other, and
+    -- the inserter is left alone accordingly. When it drives off nothing is destroyed, mined
+    -- or built, so not one of the events this mod listens to fires, and the inserter quietly
+    -- starts putting things on the ground with nobody watching it.
+    --
+    -- This is the case the background reading of the map exists for, and the one that says
+    -- most plainly why it cannot be dropped: being found here is a matter of when the
+    -- reading comes round, not of hearing about anything.
+    world.stacking(3)
+    world.capacity(3)
+    local car = world.place("car", 1, world.ROW)
+    local inserter = world.rig(1)
+    after_ticks(30, function()
+      assert.is_not_nil(inserter.drop_target, "the car is not what it aims at")
+      assert.are.equal("car", inserter.drop_target.name)
+      assert.is_nil(storage.droppers[inserter.unit_number],
+        "an inserter loading a car is being watched")
+      -- driven off, as a player would; nothing is raised by that
+      car.teleport(world.at(20, world.ROW))
+      -- Nothing was removed, so nothing queued this inserter to be looked at again. That is
+      -- the whole point: the queue is how the mod hears about things, and it is empty.
+      assert.is_nil(storage.pending[inserter.unit_number],
+        "a car driving away queued the inserter, so some event did fire after all")
+    end)
+    after_ticks(120, function()
+      assert.is_nil(inserter.drop_target, "the car is somehow still its target")
+      -- Found all the same, by the reading coming past its chunk rather than by any event.
+      assert.is_not_nil(storage.droppers[inserter.unit_number],
+        "the reading of the map never noticed the car had gone")
+    end)
+    after_ticks(120 + world.SETTLE, function()
+      assert.is_true(world.piled(inserter) > 1,
+        ("only %d items on the ground where the car used to be"):format(
+          world.piled(inserter)))
+    end)
+  end)
+end)
+
 describe("an inserter that is given somewhere to put things", function()
   it("is let go of again", function()
     world.stacking(3)

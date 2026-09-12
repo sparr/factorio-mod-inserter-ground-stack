@@ -67,7 +67,7 @@ local WAITING_FOR_TRAIN = defines.entity_status.waiting_for_train
 --- Counted in entities as well as chunks because the two are not the same expense. A chunk
 --- of open ground is nothing; a chunk of a bus is hundreds of inserters, and a budget that
 --- counted only chunks would take all of them in one tick.
-local FIRST_PASS_BUDGET = 64
+local FIRST_PASS_BUDGET = 256
 
 --- And how much it does once it has been round once.
 ---
@@ -77,9 +77,9 @@ local FIRST_PASS_BUDGET = 64
 --- whose rail has gone is found. What is left for the reading to catch is a script that
 --- changed the map and said nothing, which is rare and never urgent.
 ---
---- One chunk a tick is a pass in seconds on a small map and about an hour on a megabase.
---- The hour is the right answer: nothing is waiting on it.
-local IDLE_BUDGET = 1
+--- Sixty four a tick is a pass in moments on a small map and about a quarter of an hour on
+--- a megabase, which is the right pace for something nothing is waiting on.
+local IDLE_BUDGET = 64
 
 --- Things an inserter can put items into that the game does not count as buildings. Asked
 --- by type, because what matters is that a wagon or a car can be the thing an inserter was
@@ -92,14 +92,45 @@ local VEHICLES = {
   ["locomotive"] = true,
 }
 
---- Whether an inserter could have been putting things into this kind of thing, remembered
---- by prototype name.
+--- Things that stand in for something that will catch items. A ghost of anything that
+--- receives them is an inserter's drop target in its own right: the inserter says
+--- `waiting_for_target_to_be_built` and puts nothing down at all, so cancelling the ghost is
+--- the moment the ground becomes fair game.
+local STAND_INS = { ["entity-ghost"] = true }
+
+--- Things that come and go in their thousands: a forest burning, a field on Gleba being
+--- harvested. An item cannot be put down on a tree, so one of them is in an inserter's way
+--- while it stands there, but an inserter aimed at a tree is still watched the whole time --
+--- nothing about a tree makes the mod let go of it -- so there is nothing to re-find and no
+--- reason to search the neighbourhood every time one falls.
+local GROWTH = { tree = true, plant = true }
+
+--- Whether taking this away could change where an inserter's items land, remembered by
+--- prototype name.
+---
+--- Three ways it can, and the first version of this described only the first.
+---
+--- It was catching them: a chest, a machine, a wagon. Take it away and the inserter has
+--- nowhere to put them but the ground.
+---
+--- It was standing in for something that would, which is a ghost.
+---
+--- It was in the way: an item cannot be put down on a rail at all, because rails and items
+--- lying on the ground share a collision layer. That is the one this mod leans on hardest,
+--- since an inserter aimed at rail is let go of on purpose and the rail going away is the
+--- only thing that brings it back. Asked of the collision masks rather than of is_building,
+--- which rails happen to satisfy: resting the whole of that on a coincidence would be
+--- resting it on luck, and it is not true of every rail -- an elevated one does not block an
+--- item at all, because you can drop things underneath it.
 ---
 --- Every entity that dies or is mined anywhere on the map comes past here, which during a
---- biter wave or a forest fire is a great many of them, so the answer has to be cheap. A
---- biter, a tree, a fish and an ore patch are none of them buildings, and that is most of
---- the traffic gone for one table lookup.
-local catches_items = {}
+--- biter wave is a great many of them, so the answer has to be cheap. A biter, a fish and an
+--- ore patch are none of these things, and that is most of the traffic gone for one table
+--- lookup.
+local matters_when_gone = {}
+
+--- What an item lying on the ground collides with, worked out once.
+local item_layers
 
 --- Whether an item turns into something alive when it spoils, remembered by name.
 ---
@@ -572,7 +603,8 @@ end
 ---@param event EventData.on_entity_died|EventData.on_player_mined_entity
 local function onRemoveEntity(event)
   if not storage.active then return end
-  local entity = event.entity
+  -- a ghost being deconstructed comes as `ghost`; everything else comes as `entity`
+  local entity = event.entity or event.ghost
   if not (entity and entity.valid) then return end
 
   if entity.type == "inserter" then
@@ -581,10 +613,26 @@ local function onRemoveEntity(event)
   end
 
   local name = entity.name
-  local worth_a_look = catches_items[name]
+  local worth_a_look = matters_when_gone[name]
   if worth_a_look == nil then
-    worth_a_look = entity.prototype.is_building or VEHICLES[entity.type] or false
-    catches_items[name] = worth_a_look
+    local kind = entity.type
+    if GROWTH[kind] then
+      worth_a_look = false
+    elseif STAND_INS[kind] or VEHICLES[kind] then
+      worth_a_look = true
+    else
+      local proto = entity.prototype
+      worth_a_look = proto.is_building or false
+      if not worth_a_look then
+        if not item_layers then
+          item_layers = prototypes.entity["item-on-ground"].collision_mask.layers
+        end
+        for layer in pairs(proto.collision_mask.layers) do
+          if item_layers[layer] then worth_a_look = true break end
+        end
+      end
+    end
+    matters_when_gone[name] = worth_a_look
   end
   if not worth_a_look then return end
 
@@ -646,6 +694,11 @@ script.on_event(defines.events.on_space_platform_pre_mined, onRemoveEntity)
 script.on_event(defines.events.on_entity_died, onRemoveEntity)
 script.on_event(defines.events.script_raised_destroy, onRemoveEntity)
 
+-- A ghost is not mined and does not die; cancelling one has events of its own, and they
+-- name the thing `ghost` rather than `entity`.
+script.on_event(defines.events.on_pre_ghost_deconstructed, onRemoveEntity)
+script.on_event(defines.events.on_pre_ghost_upgraded, onRemoveEntity)
+
 script.on_event(defines.events.on_tick, onTick)
 
 -- Whether anybody can stack things at all, looked at about once a second. That is a handful
@@ -695,6 +748,7 @@ if script.active_mods["factorio-test"] and script.active_mods["igs-tests"] then
     "test.ft.limits",
     "test.ft.lifecycle",
     "test.ft.rails",
+    "test.ft.ghosts",
     "test.ft.platforms",
     "test.ft.aquilo",
   }, {

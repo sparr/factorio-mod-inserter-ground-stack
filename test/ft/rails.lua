@@ -153,17 +153,14 @@ describe("an inserter whose rail is taken away", function()
         -- no raise_destroy: as far as every event goes, this never happened
         if rail.valid then rail.destroy() end
       end
+      -- Nothing queued this inserter to be looked at again, because nothing was announced.
+      -- Whatever finds it now is the reading and not an event.
+      assert.is_nil(storage.pending[inserter.unit_number],
+        "a removal that raised no event queued the inserter anyway")
     end)
-    after_ticks(world.SETTLE + 60, function()
-      assert.is_nil(storage.droppers[inserter.unit_number],
-        "something heard about a removal that raised no event, which cannot be")
-      -- What the reading does when it comes past this chunk, done here at once rather than
-      -- waited for. How long the background reading takes to come round is the size of the
-      -- map and not a thing a test can sit through; that it registers what it comes across
-      -- is tested in test.ft.lifecycle, on an inserter no event ever mentioned either.
-      world.refresh()
+    after_ticks(world.SETTLE + 120, function()
       assert.is_not_nil(storage.droppers[inserter.unit_number],
-        "the rail went without a word and reading the map did not notice")
+        "the rail went without a word and the reading never noticed")
     end)
     after_ticks(world.SETTLE * 2 + 60, function()
       assert.is_true(world.piled(inserter) > 1,
