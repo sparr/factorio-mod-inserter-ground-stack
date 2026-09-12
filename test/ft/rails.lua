@@ -146,6 +146,7 @@ describe("an inserter whose rail is taken away", function()
     world.capacity(3)
     local inserter = world.rig(1)
     local rails = rail_under(inserter)
+    local rounds
     after_ticks(world.SETTLE, function()
       assert.is_nil(storage.droppers[inserter.unit_number],
         "it was never let go of, so finding it again proves nothing")
@@ -157,8 +158,14 @@ describe("an inserter whose rail is taken away", function()
       -- Whatever finds it now is the reading and not an event.
       assert.is_nil(storage.pending[inserter.unit_number],
         "a removal that raised no event queued the inserter anyway")
+      rounds = storage.rescan.passes
     end)
     after_ticks(world.SETTLE + 120, function()
+      -- and the reading really did come past in between, rather than the inserter turning
+      -- up on the list by some other road
+      assert.is_true(storage.rescan.passes > rounds,
+        ("the reading has been round %d times and was %d when the rail went, so it never "
+          .. "came past"):format(storage.rescan.passes, rounds))
       assert.is_not_nil(storage.droppers[inserter.unit_number],
         "the rail went without a word and the reading never noticed")
     end)

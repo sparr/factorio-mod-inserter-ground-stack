@@ -208,6 +208,86 @@ describe("a factory full of fake loaders", function()
   end)
 end)
 
+describe("a surface that is deleted", function()
+  -- A space platform being blown up, or any mod that makes a surface and later throws it
+  -- away. Everything standing on it becomes invalid at once, without a mining or a dying
+  -- event for any of it, and the mod is left holding references to things that no longer
+  -- exist. Two separate things have to survive that: the list of watched inserters, and the
+  -- background reading, which may be part way through walking the very surface that went.
+  local doomed
+
+  local function make_doomed()
+    if game.surfaces["igs-doomed"] then game.delete_surface("igs-doomed") end
+    local surface = game.create_surface("igs-doomed")
+    surface.request_to_generate_chunks({ x = 0, y = 0 }, 2)
+    surface.force_generate_chunk_requests()
+    return surface
+  end
+
+  after_each(function()
+    if game.surfaces["igs-doomed"] then game.delete_surface("igs-doomed") end
+  end)
+
+  it("takes its inserters off the list, and the mod carries on", function()
+    world.stacking(3)
+    world.capacity(3)
+    doomed = make_doomed()
+    local aloft = world.rig_on(doomed, { x = 0.5, y = 0.5 })
+    local unit_number = aloft.unit_number
+    after_ticks(60, function()
+      assert.is_not_nil(storage.droppers[unit_number],
+        "the inserter on the new surface was never watched, so losing it proves nothing")
+      game.delete_surface("igs-doomed")
+    end)
+    after_ticks(180, function()
+      assert.is_nil(game.surfaces["igs-doomed"], "the surface is still here")
+      assert.is_nil(storage.droppers[unit_number],
+        "an inserter on a surface that no longer exists is still on the list")
+      assert.is_nil(storage.busy[unit_number])
+      assert.is_nil(storage.due[unit_number])
+    end)
+  end)
+
+  it("does not stop the reading of the map", function()
+    -- The reading keeps where it had got to as a surface index and a count of chunks. If
+    -- the surface it was walking is deleted underneath it, it has to pick up on another one
+    -- rather than sit there for ever, or everything the reading is the backstop for stops
+    -- being caught.
+    world.stacking(3)
+    world.capacity(3)
+    doomed = make_doomed()
+    world.rig_on(doomed, { x = 0.5, y = 0.5 })
+    local rounds
+    after_ticks(60, function()
+      rounds = storage.rescan.passes
+      game.delete_surface("igs-doomed")
+    end)
+    after_ticks(300, function()
+      assert.is_true(storage.rescan.passes > rounds,
+        ("the reading has been round %d times and was %d when the surface went: it stopped")
+          :format(storage.rescan.passes, rounds))
+    end)
+  end)
+
+  it("leaves the inserters on every other surface alone", function()
+    world.stacking(3)
+    world.capacity(3)
+    doomed = make_doomed()
+    world.rig_on(doomed, { x = 0.5, y = 0.5 })
+    local home = world.rig(1)
+    after_ticks(60, function()
+      assert.is_not_nil(storage.droppers[home.unit_number], "the one at home was not watched")
+      game.delete_surface("igs-doomed")
+    end)
+    after_ticks(180 + world.SETTLE, function()
+      assert.is_not_nil(storage.droppers[home.unit_number],
+        "deleting one surface took an inserter off another one")
+      assert.is_true(world.piled(home) > 1,
+        ("the inserter at home stopped working, %d on the ground"):format(world.piled(home)))
+    end)
+  end)
+end)
+
 describe("the list", function()
   it("does not grow without bound as fixtures come and go", function()
     world.stacking(3)
