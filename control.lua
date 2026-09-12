@@ -672,10 +672,15 @@ end
 ---
 --- Surveyed rather than guessed at. Of the 111 inserter and loader mods on the portal
 --- built for 2.x with more than two thousand downloads, 56 publish source that could be
---- read; 15 of those write drop_position or pickup_position, and three of the 15 raise
---- anything at all when they do. These are those three. The other twelve say nothing
---- whatever, and neither can anything be said about the 55 whose source is not published,
---- which between them are why the console command exists.
+--- read. Eleven of those move a live inserter's aim, and three of the eleven say so.
+--- These are those three.
+---
+--- Of the eight that say nothing, most turn out not to matter: four only ever re-aim an
+--- inserter while handling a build, a rotation or a paste, which this mod hears anyway and
+--- looks at a tick later, by which time their change has landed. What is left is the ones
+--- that move an inserter from a hotkey of their own with nothing else going on, and
+--- nothing can be done about those but the console command -- nor about the 55 mods whose
+--- source is not published at all.
 ---
 --- Two of the three declare a custom-event prototype in their data stage, so the id is
 --- sitting in defines.events by the time this file is read and a name is all that is
@@ -754,10 +759,11 @@ script.on_event(defines.events.script_raised_revive, onPlaceEntity, INSERTERS_ON
 script.on_event(defines.events.on_entity_cloned,
                 function(event) later(event.destination) end, INSERTERS_ONLY)
 
--- Turning an inserter round, or pasting settings onto one, moves where its items land.
--- Neither of these takes a filter, so later() does the refusing; both are a player's own
--- doing and arrive a handful at a time rather than in their thousands.
+-- Turning an inserter round, flipping it, or pasting settings onto one all move where its
+-- items land. None of the three takes a filter, so later() does the refusing; all three
+-- are a player's own doing and arrive a handful at a time rather than in their thousands.
 script.on_event(defines.events.on_player_rotated_entity, onPlaceEntity)
+script.on_event(defines.events.on_player_flipped_entity, onPlaceEntity)
 script.on_event(defines.events.on_entity_settings_pasted, function(event) later(event.destination) end)
 
 -- and a teleported inserter takes its drop position with it, but not what was standing
