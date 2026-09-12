@@ -126,15 +126,22 @@ describe("an inserter with somewhere to put things", function()
 end)
 
 describe("an inserter whose target drives away", function()
-  it("is not heard about, because nothing was removed", function()
+  it("is kept on the list while the car sits there, so nothing has to find it again",
+     function()
     -- A car parked where an inserter puts things down is a drop target like any other, and
-    -- the inserter is left alone accordingly. When it drives off nothing is destroyed, mined
-    -- or built, so not one of the events this mod listens to fires, and the inserter quietly
-    -- starts putting things on the ground with nobody watching it.
+    -- an inserter with somewhere to put things is normally let go of. This one is not.
     --
-    -- This is the case the background reading of the map exists for, and the one that says
-    -- most plainly why it cannot be dropped: being found here is a matter of when the
-    -- reading comes round, not of hearing about anything.
+    -- When a car drives off nothing is destroyed, mined or built -- the car still exists,
+    -- it is simply not there any more -- so not one of the events this mod listens to
+    -- fires, and there is no event in the game for the thing under an inserter's hand
+    -- moving. Letting go would therefore mean waiting on the background reading. Keeping
+    -- it means there is nothing to find: it is on the list while the car stands there and
+    -- still on it once the car has gone.
+    --
+    -- That continuity is what this measures, by looking before as well as after, and it is
+    -- the only thing that can be measured here. Timing would prove nothing -- the arena is
+    -- a few hundred chunks, so the reading goes round it several times over in the span of
+    -- this test, and on a map that size it could always be credited with the find.
     world.stacking(3)
     world.capacity(3)
     local car = world.place("car", 1, world.ROW)
@@ -142,22 +149,22 @@ describe("an inserter whose target drives away", function()
     after_ticks(30, function()
       assert.is_not_nil(inserter.drop_target, "the car is not what it aims at")
       assert.are.equal("car", inserter.drop_target.name)
-      assert.is_nil(storage.droppers[inserter.unit_number],
-        "an inserter loading a car is being watched")
+      -- before: on the list although it has a drop target, which nothing else in the suite
+      -- is allowed to be
+      assert.is_not_nil(storage.droppers[inserter.unit_number],
+        "an inserter loading something that can drive away was let go of")
+      assert.are.equal(0, world.piled(inserter),
+        "it put something on the ground with a car standing on the spot")
       -- driven off, as a player would; nothing is raised by that
       car.teleport(world.at(20, world.ROW))
-      -- Nothing was removed, so nothing queued this inserter to be looked at again. That is
-      -- the whole point: the queue is how the mod hears about things, and it is empty.
       assert.is_nil(storage.pending[inserter.unit_number],
         "a car driving away queued the inserter, so some event did fire after all")
     end)
-    after_ticks(120, function()
+    after_ticks(30 + 60, function()
       assert.is_nil(inserter.drop_target, "the car is somehow still its target")
-      -- Found all the same, by the reading coming past its chunk rather than by any event.
+      -- after: the same entry, never taken out and so never needing to be found
       assert.is_not_nil(storage.droppers[inserter.unit_number],
-        "the reading of the map never noticed the car had gone")
-    end)
-    after_ticks(120 + world.SETTLE, function()
+        "it was dropped from the list the moment the car left")
       assert.is_true(world.piled(inserter) > 1,
         ("only %d items on the ground where the car used to be"):format(
           world.piled(inserter)))
@@ -339,103 +346,6 @@ describe("the list", function()
       for _ in pairs(storage.droppers) do watched = watched + 1 end
       assert.are.equal(0, watched,
         ("%d inserters still watched after all four were destroyed"):format(watched))
-    end)
-  end)
-end)
-
-describe("the removals the mod asks the engine not to tell it about", function()
-  -- Every removal event is registered with a filter naming a few kinds of thing that are
-  -- never worth looking at, so that a map full of them -- asteroids off the bows of
-  -- platforms, a forest on fire, a wave of biters -- does not pay to cross into Lua only to
-  -- be thrown away. A filter is fixed when the mod loads, so nothing at runtime can notice
-  -- if what entitles it stops being true, which is what these two check.
-  --
-  -- Two checks rather than one because there are two different entitlements, and the first
-  -- draft of this ran them together and was wrong about trees.
-  it("could not have been in an inserter's way, for the ones filtered on that", function()
-    -- Two prototype facts, asked of the game as it stands rather than of what was true when
-    -- the list was written: none of them is a building, so none could have been catching an
-    -- inserter's items, and none shares a collision layer with an item lying on the ground,
-    -- so none could have been stopping an item from being put down.
-    local kinds = {}
-    for _, kind in pairs(remote.call("inserter-ground-stack", "report").never_in_the_way) do
-      kinds[kind] = true
-    end
-    assert.is_true(next(kinds) ~= nil, "the mod says it filters nothing out on those grounds")
-
-    local blocking = prototypes.entity["item-on-ground"].collision_mask.layers
-    local checked = 0
-    for name, proto in pairs(prototypes.entity) do
-      if kinds[proto.type] then
-        checked = checked + 1
-        assert.is_not_true(proto.is_building,
-          ("%s is a building now, so an inserter could have been loading one and the "
-            .. "filter is losing that"):format(name))
-        for layer in pairs(proto.collision_mask.layers) do
-          assert.is_nil(blocking[layer],
-            ("%s now blocks an item from being put down, on the %s layer, so one of them "
-              .. "going away can matter and the filter is losing that"):format(name, layer))
-        end
-      end
-    end
-    assert.is_true(checked > 0,
-      "not one of those kinds has a prototype in this game, so this checked nothing")
-  end)
-
-  it("leave an inserter they stop still on the list, for the ones filtered on that",
-     function()
-    -- The other entitlement, and the one that cannot be read off a prototype. A tree does
-    -- stop an inserter putting something down. What makes the removal not worth hearing is
-    -- that the inserter is never let go of while the tree stands there, so nothing has to
-    -- find it again when the tree falls -- it simply starts working.
-    --
-    -- Checked on a real tree in a real inserter's way, with the mod told nothing: the
-    -- filter means the event never arrives, so if the reasoning were wrong this inserter
-    -- would sit there for ever.
-    local kinds = remote.call("inserter-ground-stack", "report").never_let_go_of
-    assert.is_true(#kinds > 0, "the mod says it filters nothing out on those grounds")
-    local growth
-    for _, kind in pairs(kinds) do
-      for name, proto in pairs(prototypes.entity) do
-        if proto.type == kind and growth == nil and proto.collision_box then growth = name end
-      end
-    end
-    assert.is_not_nil(growth, "this game has no tree or plant to stand in the way")
-
-    world.stacking(3)
-    world.capacity(3)
-    local inserter = world.rig(1)
-    local surface = world.surface()
-    local drop = inserter.drop_position
-    -- Exactly where it aims, not the middle of the tile: a tree is small and a fixture that
-    -- misses tests bare ground while looking like it tests a tree.
-    local tree = surface.create_entity{ name = growth, position = drop, force = "neutral",
-                                        raise_built = true }
-    assert.is_not_nil(tree, ("could not put a %s in the way"):format(growth))
-    local covers = false
-    for _, thing in pairs(surface.find_entities_filtered{ position = drop }) do
-      if thing.valid and thing == tree then covers = true end
-    end
-    assert.is_true(covers,
-      ("the %s does not cover %.2f,%.2f, where the inserter aims"):format(
-        growth, drop.x, drop.y))
-
-    after_ticks(world.SETTLE, function()
-      assert.are.equal(0, world.piled(inserter),
-        ("items landed under a %s, so it was never in the way and this proves nothing")
-          :format(growth))
-      assert.is_not_nil(storage.droppers[inserter.unit_number],
-        ("an inserter stopped by a %s was let go of, so its going does need hearing about")
-          :format(growth))
-      tree.destroy{ raise_destroy = true }
-      assert.is_nil(storage.pending[inserter.unit_number],
-        ("a %s going raised something the mod acted on, so the filter is not applying and "
-          .. "this proves nothing"):format(growth))
-    end)
-    after_ticks(world.SETTLE * 2, function()
-      assert.is_true(world.piled(inserter) > 1,
-        ("only %d items on the ground once the %s was gone: the mod never picked it back up")
-          :format(world.piled(inserter), growth))
     end)
   end)
 end)

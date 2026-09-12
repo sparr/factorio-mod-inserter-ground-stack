@@ -135,6 +135,33 @@ local VEHICLES = {
   ["locomotive"] = true,
 }
 
+--- Things an inserter can be aimed at that may move off the spot under their own power,
+--- with no event of any kind to say they have.
+---
+--- An inserter loading one of these is normally let go of, the way every inserter with
+--- somewhere to put things is. But when a car drives away nothing is built, mined or
+--- destroyed -- the car still exists, it is simply not there any more -- and there is no
+--- event in the game for the thing under an inserter's hand moving. So these are kept on
+--- the list while they wait, and top_up finds them the moment the ground clears.
+---
+--- Rolling stock is deliberately not here, although it moves and moves often. A train can
+--- only stand on rail, and an item can never be put down on rail, so the ground under a
+--- wagon is no more use to an inserter than the wagon was: when the train pulls out the
+--- inserter goes to waiting_for_train and is let go of again, which is where it started.
+--- Keeping them would have been the expensive half too -- on a megabase, 3,409 inserters
+--- were loading rolling stock against none at all loading a car.
+---
+--- A cargo pod is here on suspicion rather than on evidence. Nothing in the game aims an
+--- inserter at one -- a rocket is loaded through its silo and a platform through its hub --
+--- and one has no inventory this mod could find. But it flies away by itself, so if some
+--- mod ever does aim an inserter at one, this is the answer that would be right, and since
+--- there are never any of them to carry it costs nothing to be ready.
+local MOVABLE = {
+  ["car"] = true,
+  ["spider-vehicle"] = true,
+  ["cargo-pod"] = true,
+}
+
 --- Things that stand in for something that will catch items. A ghost of anything that
 --- receives them is an inserter's drop target in its own right: the inserter says
 --- `waiting_for_target_to_be_built` and puts nothing down at all, so cancelling the ghost is
@@ -238,10 +265,46 @@ local INSERTERS_ONLY = { { filter = "type", type = "inserter" } }
 --- biter wave is a great many of them, so the answer has to be cheap. A biter, a fish and an
 --- ore patch are none of these things, and that is most of the traffic gone for one table
 --- lookup.
-local matters_when_gone = {}
+---
+--- Keyed by name rather than by type because prototypes of one type disagree: simple-entity
+--- covers a rock, which is in the way, beside things that are not. It holds no more than
+--- what has already been worked out once, and it is a file local rather than anything kept
+--- in the save, so it is built again from nothing every session: a prototype renamed or
+--- redefined between one version and the next cannot leave a stale answer behind.
+local remembered = {}
 
 --- What an item lying on the ground collides with, worked out once.
 local item_layers
+
+---Whether this kind of thing could have been in an inserter's way at all.
+---
+---The question underneath the whole of the above, asked of the prototype on its own and of
+---nothing else. Separate from the answer the mod acts on so that a test can put every
+---prototype in the game through it and check the kinds the event filter refuses really are
+---kinds this would have refused anyway; run together, that check asks the filter about the
+---filter and passes whatever the filter says.
+---@param proto LuaEntityPrototype
+---@return boolean
+local function blocks_or_catches(proto)
+  local kind = proto.type
+  if STAND_INS[kind] or VEHICLES[kind] then return true end
+  if proto.is_building then return true end
+  if not item_layers then
+    item_layers = prototypes.entity["item-on-ground"].collision_mask.layers
+  end
+  for layer in pairs(proto.collision_mask.layers) do
+    if item_layers[layer] then return true end
+  end
+  return false
+end
+
+---Whether one of these going away is worth looking round for.
+---@param proto LuaEntityPrototype
+---@return boolean
+local function worth_a_look_when_gone(proto)
+  if not_worth_hearing[proto.type] then return false end
+  return blocks_or_catches(proto)
+end
 
 --- Whether an item turns into something alive when it spoils, remembered by name.
 ---
@@ -372,7 +435,9 @@ end
 local function watch(entity)
   if not (entity and entity.valid and entity.type == "inserter") then return end
   local unit_number = entity.unit_number--[[@as uint]]
-  if entity.drop_target or entity.status == WAITING_FOR_TRAIN then
+  local target = entity.drop_target
+  if (target and not MOVABLE[target.type])
+      or (not target and entity.status == WAITING_FOR_TRAIN) then
     -- Turned away at the door rather than taken on and dropped at the next look. The
     -- background reading comes past every inserter on the map again and again, and an
     -- inserter aimed at rail that were let go of only afterwards would be taken on and
@@ -425,8 +490,14 @@ end
 ---@return boolean emptied whether the hand came away with nothing left in it
 local function top_up(unit_number, inserter)
   if not inserter.valid then forget(unit_number) return false, false end
-  -- something has been built where its items used to land, so it is somebody else's problem
-  if inserter.drop_target then forget(unit_number) return false, false end
+  -- Something has been built where its items used to land, so it is somebody else's
+  -- problem -- unless that something can drive away again, in which case this inserter is
+  -- kept and simply has nothing to do until it does.
+  local target = inserter.drop_target
+  if target then
+    if not MOVABLE[target.type] then forget(unit_number) end
+    return false, false
+  end
   local status = inserter.status
   -- Rail with a train coming to it. Nothing will ever be put down here, so this is not an
   -- inserter worth carrying; the rail going away is what brings it back.
@@ -878,27 +949,13 @@ local function onRemoveEntity(event)
     return
   end
 
+  -- The name and a table lookup, and nothing else, for the great majority that turn out not
+  -- to matter. Only the first of each kind pays for the prototype to be fetched and asked.
   local name = entity.name
-  local worth_a_look = matters_when_gone[name]
+  local worth_a_look = remembered[name]
   if worth_a_look == nil then
-    local kind = entity.type
-    if not_worth_hearing[kind] then
-      worth_a_look = false
-    elseif STAND_INS[kind] or VEHICLES[kind] then
-      worth_a_look = true
-    else
-      local proto = entity.prototype
-      worth_a_look = proto.is_building or false
-      if not worth_a_look then
-        if not item_layers then
-          item_layers = prototypes.entity["item-on-ground"].collision_mask.layers
-        end
-        for layer in pairs(proto.collision_mask.layers) do
-          if item_layers[layer] then worth_a_look = true break end
-        end
-      end
-    end
-    matters_when_gone[name] = worth_a_look
+    worth_a_look = worth_a_look_when_gone(entity.prototype)
+    remembered[name] = worth_a_look
   end
   if not worth_a_look then return end
 
@@ -1029,8 +1086,41 @@ local function report()
   }
 end
 
+---What the mod makes of one kind of thing, asked by prototype name.
+---
+---A question worth being able to ask from outside, and the one a mod author debugging an
+---interaction actually has: when my entity goes away, will you notice? The answer is the
+---two decisions the mod draws and the fact underneath them, so it is possible to see which
+---step went the way it did rather than only that the outcome was wrong.
+---
+---By name because that is how prototypes are addressed everywhere else -- it is the
+---argument, not anything the mod keeps. Nothing here is remembered between calls and
+---nothing is read from the save.
+---
+---It is also the seam the prototype sweep in test.ft.removals goes through, which is the
+---point of it existing rather than the reasoning being written out twice: a test that
+---re-implements the rule proves the copy right, not the mod.
+---@param name string a prototype name, as prototypes.entity is keyed
+---@return { type: string, blocks_or_catches: boolean, heard_about: boolean, matters_when_gone: boolean, movable: boolean }? nil if this game has no prototype of that name
+local function about(name)
+  local proto = prototypes.entity[name]
+  if proto == nil then return nil end
+  return {
+    type = proto.type,
+    -- could one of these ever have been catching an inserter's items, or stopping one from
+    -- being put down
+    blocks_or_catches = blocks_or_catches(proto),
+    -- whether the mod asked the engine to mention it at all when one is removed
+    heard_about = not not_worth_hearing[proto.type],
+    -- and what it makes of the removal once it hears
+    matters_when_gone = worth_a_look_when_gone(proto),
+    -- whether an inserter aimed at one is kept on the list against its moving off
+    movable = MOVABLE[proto.type] or false,
+  }
+end
+
 remote.add_interface("inserter-ground-stack",
-                      {refreshData = refreshData, report = report}
+                      {refreshData = refreshData, report = report, about = about}
                     )
 
 -- igs-tests is never published, so this can never fire on a player's machine -- which
@@ -1041,6 +1131,7 @@ if script.active_mods["factorio-test"] and script.active_mods["igs-tests"] then
     "test.ft.research",
     "test.ft.limits",
     "test.ft.lifecycle",
+    "test.ft.removals",
     "test.ft.rails",
     "test.ft.reading",
     "test.ft.ghosts",
