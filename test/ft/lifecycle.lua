@@ -77,6 +77,40 @@ describe("an inserter with somewhere to put things", function()
     end)
   end)
 
+  it("is dropped again when a chest is built where it had been piling", function()
+    -- The way round the other three do not cover, and the one that no event tells the mod
+    -- about at all. Build events are filtered to inserters, and were only ever acted on for
+    -- inserters, so a chest appearing in front of one says nothing to this mod: what
+    -- notices is top_up, which reads the drop target before anything else every time the
+    -- sweep comes past, and lets go the moment there is one.
+    world.stacking(3)
+    world.capacity(3)
+    local inserter = world.rig(1)
+    after_ticks(world.JAM, function()
+      assert.is_not_nil(storage.droppers[inserter.unit_number],
+        "it was never watched, so being dropped proves nothing")
+      assert.is_true(world.piled(inserter) > 1,
+        "it was never piling, so being dropped proves nothing")
+      local chest = world.place("steel-chest", 1, world.ROW)
+      assert.is_not_nil(chest)
+    end)
+    after_ticks(world.JAM + 5, function()
+      assert.is_not_nil(inserter.drop_target,
+        "the chest did not become what it aims at, so this proves nothing")
+      assert.are.equal("steel-chest", inserter.drop_target.name)
+    end)
+    after_ticks(world.JAM + 90, function()
+      assert.is_nil(storage.droppers[inserter.unit_number],
+        "a chest was built in front of it and it is still being watched")
+      assert.is_nil(storage.busy[inserter.unit_number],
+        "it was let go of but left in the busy set")
+    end)
+    after_ticks(world.JAM + 90 + world.SETTLE, function()
+      assert.is_true(inserter.drop_target.get_item_count("iron-plate") > 0,
+        "it never got on with loading the chest")
+    end)
+  end)
+
   it("starts being watched when a script takes that chest away", function()
     world.stacking(3)
     local target = world.place("steel-chest", 1, world.ROW)
