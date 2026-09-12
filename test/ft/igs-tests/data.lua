@@ -76,3 +76,25 @@ data:extend({
     platform_picture = vanilla.platform_picture,
   },
 })
+
+--- The events that the mods which re-aim inserters raise.
+---
+--- Declared here so that the real path can be exercised: control.lua takes these up by
+--- name at load, exactly as it would with Bob's Adjustable Inserters or Quick Adjustable
+--- Inserters installed, and test.ft.aiming raises them. Without this the registration
+--- would be untested code that only ran on somebody else's machine.
+---
+--- Standing in for another mod's prototype is only safe because igs-tests is never
+--- published and never loaded beside the mods whose names these are.
+---
+--- This list must hold every name in ADJUSTERS_BY_PROTOTYPE. test.ft.aiming reads that
+--- list from the mod and fails if one of them is missing from here, so the two cannot
+--- drift apart in silence.
+for _, name in pairs({
+  "on_bobs_inserter_adjusted",
+  "on_qai_inserter_vectors_changed",
+  "on_qai_inserter_direction_changed",
+  "on_qai_inserter_adjustment_finished",
+}) do
+  data:extend({ { type = "custom-event", name = name } })
+end

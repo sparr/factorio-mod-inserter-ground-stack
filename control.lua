@@ -1,26 +1,10 @@
 ---What the mod keeps in the save.
 ---
----Where the background reading of the map stands.
----
----`at` counts chunks into a surface being crawled; `bx`/`by` are the corner of the next
----block of one being read by blocks; only one of the two is ever in use. `survey` is what a
----crawl in progress has learnt about where the surface's chunks lie, and becomes its entry
----in `rect` when the crawl reaches the end.
----@class RescanState
----@field surface uint? the surface being read
----@field at uint how many chunks into it a crawl has got
----@field bx integer? the next block's left edge, in chunks
----@field by integer? the next block's top edge, in chunks
----@field passes uint how many times the reading has been round every surface
----@field rect { [uint]: { x0: integer, y0: integer, x1: integer, y1: integer, n: integer } } the rectangle each surface's chunks fill, for the ones read by blocks
----@field survey { x0: integer, y0: integer, x1: integer, y1: integer, n: integer }? what the crawl in progress has seen so far
-
 ---@class InserterGroundStackStorage
 ---@field droppers { [uint]: LuaEntity } every inserter that puts things down on bare ground, by unit number
 ---@field busy { [uint]: uint } the tick each of those was last topped up on, for the ones that recently were
 ---@field due { [uint]: uint } the soonest tick each of those could possibly want looking at again
 ---@field pending { [uint]: LuaEntity } inserters to look at again once whatever was in their way has finished going
----@field rescan RescanState? how far the background reading of the map has got
 ---@field active boolean whether anybody in this game has researched belt stacking yet
 
 --- What an inserter says about itself when it has swung out, found the spot it puts things
@@ -69,60 +53,6 @@ local SWEEP_TICKS = 10
 --- 6,020. They are let go of rather than carried, and found again by the ordinary means when
 --- the rail under them goes away.
 local WAITING_FOR_TRAIN = defines.entity_status.waiting_for_train
-
---- How much the background reading does in a tick, counted in both chunks looked at and
---- inserters found in them.
----
---- Reading a whole factory is the one expensive thing this mod does: on a megabase, doing it
---- in a single tick took 4.9 seconds, which is a freeze rather than a hitch. A fixed amount
---- of work a tick means the cost does not depend on the size of the map at all. What varies
---- instead is how long a pass takes to come round -- about a minute on a large map, moments
---- on a small one -- and that is the thing that can afford to vary.
----
---- Counted in entities as well as chunks because the two are not the same expense. A chunk
---- of open ground is nothing; a chunk of a bus is hundreds of inserters, and a budget that
---- counted only chunks would take all of them in one tick.
-local FIRST_PASS_BUDGET = 256
-
---- And how much it does once it has been round once.
----
---- A crawl, because by then it is only a backstop. Everything that announces itself is dealt
---- with the moment it happens: an inserter built, turned round or taken away, and a few
---- tiles looked at again around anything else that is removed, which is how an inserter
---- whose rail has gone is found. What is left for the reading to catch is a script that
---- changed the map and said nothing, which is rare and never urgent.
----
---- Sixty four a tick is a pass in moments on a small map and a minute and a half on a
---- megabase, which is the right pace for something nothing is waiting on.
-local IDLE_BUDGET = 64
-
---- How many chunks across the square of ground read in one query is.
----
---- Asking the engine about a block of ground costs little more than asking it about one
---- chunk of that block, because most of what a query costs is the asking. Measured over
---- every chunk of a Space Age megabase, a quarter of a million of them, one query per chunk
---- came to 11.4us a chunk and four-by-four blocks to 5.5; the six microseconds between them
---- is the call itself. Eight-by-eight saves a little more and swallows four times as much
---- ground in one bite, which makes a worse mouthful for the budget.
----
---- All three return exactly the same inserters. Checked on the whole map: a strip against
---- the chunks in it disagreed on none of a quarter of a million chunks.
-local BLOCK = 4
-
---- How much emptier than the ground in it a surface's rectangle may be before that surface
---- is read chunk by chunk instead.
----
---- Reading by blocks means reading the rectangle around a surface's generated chunks, gaps
---- and all, which is what makes the chunk list unnecessary. A gap is nearly free -- a query
---- over ground that was never generated costs 0.14us a chunk, against 5.5 for ground that
---- is really there -- so a rectangle has to be enormously emptier than the map before the
---- gaps eat the saving. The two come level at about a hundred and six times.
----
---- Thirty-two is well inside that and well outside anything an ordinary map does. On a
---- megabase spanning five planets and fifty-odd platforms the worst rectangle was 1.6 times
---- the ground in it. What it is really for is the shape a long journey leaves behind: a
---- line of chunks a thousand tiles long is a rectangle almost entirely made of gap.
-local WASTE_LIMIT = 32
 
 --- Things an inserter can put items into that the game does not count as buildings. Asked
 --- by type, because what matters is that a wagon or a car can be the thing an inserter was
@@ -547,41 +477,9 @@ local function top_up(unit_number, inserter)
   return false, false
 end
 
---- Where the crawl over a surface's chunk list has got to, which is deliberately not in
---- storage. The iterator is a game object and storage has to survive being written to a
---- file; keeping every chunk position instead was tens of thousands of numbers in every
---- save on a large map. What is stored is how many chunks in the crawl is, which is enough
---- to make the iterator again and wind it forward to the same place.
----
---- Wound forward rather than simply started again, because a save is loaded by a player
---- joining a game everybody else is still playing. Starting afresh would have that player
---- reading different chunks on different ticks from everyone else, and finding an inserter
---- a tick sooner or later than they do is enough to put the game out of step.
----
---- Only a surface being crawled needs any of this. A surface being read by blocks is at a
---- pair of chunk coordinates, which are numbers like any other, so they are simply stored
---- and there is nothing to wind.
-local walk
-
----The surface to read after the one the state names.
----@param state table
----@return LuaSurface? surface
----@return boolean wrapped whether that was the last of them and this is the first again
-local function next_surface(state)
-  local found, first
-  local past = false
-  for _, candidate in pairs(game.surfaces) do
-    if first == nil then first = candidate end
-    if past and found == nil then found = candidate end
-    if candidate.index == state.surface then past = true end
-  end
-  if found then return found, false end
-  return first, true
-end
-
 ---Look at every inserter in an area, however big it is.
 ---@param surface LuaSurface
----@param area BoundingBox
+---@param area BoundingBox?
 ---@return integer how many were found
 local function read_area(surface, area)
   local found = 0
@@ -592,231 +490,32 @@ local function read_area(surface, area)
   return found
 end
 
----The ground a block of chunks covers.
----@param bx integer chunk x of its left edge
----@param by integer chunk y of its top edge
----@return BoundingBox
-local function block_area(bx, by)
-  return {{ bx * 32, by * 32 }, {(bx + BLOCK) * 32, (by + BLOCK) * 32 }}
-end
-
----Whether a surface's rectangle is solid enough to be worth reading whole.
----@param rect { x0: integer, y0: integer, x1: integer, y1: integer, n: integer }
----@return boolean
-local function worth_blocks(rect)
-  local across = rect.x1 - rect.x0 + 1
-  local down = rect.y1 - rect.y0 + 1
-  return (across * down) <= (rect.n * WASTE_LIMIT)
-end
-
----Note where a chunk lies, while crawling, so the surface's rectangle can be worked out.
----@param state table
----@param chunk ChunkPositionAndArea
-local function survey(state, chunk)
-  local seen = state.survey
-  if seen == nil then
-    seen = { x0 = chunk.x, x1 = chunk.x, y0 = chunk.y, y1 = chunk.y, n = 0 }
-    state.survey = seen
-  end
-  if chunk.x < seen.x0 then seen.x0 = chunk.x end
-  if chunk.x > seen.x1 then seen.x1 = chunk.x end
-  if chunk.y < seen.y0 then seen.y0 = chunk.y end
-  if chunk.y > seen.y1 then seen.y1 = chunk.y end
-  seen.n = seen.n + 1
-end
-
----Keep what a finished crawl learnt, so the surface can be read by blocks next time.
----@param state table
-local function remember_rectangle(state)
-  local seen = state.survey
-  state.survey = nil
-  -- a surface with no chunks at all has nothing to remember, and will be crawled again,
-  -- which costs nothing because there is nothing to crawl
-  if seen == nil then return end
-  if worth_blocks(seen) then state.rect[state.surface] = seen end
-end
-
----Take up reading a surface from its beginning.
----@param state table
----@param surface LuaSurface
-local function begin_surface(state, surface)
-  state.surface = surface.index
-  state.at = 0
-  state.survey = nil
-  local rect = state.rect[surface.index]
-  state.bx = rect and rect.x0 or nil
-  state.by = rect and rect.y0 or nil
-  walk = nil
-end
-
----Read a slice of the map, a different slice each tick.
+---Forget every inserter and work the whole list out again from the world as it stands.
 ---
----Everything else this mod knows it was told: an inserter built, turned round, taken away.
----Not everything that changes the answer is announced. A script may build an inserter
----without raising anything, and an inserter let go of because it was aimed at rail comes
----back only because the rail going away happens to be an event. A picture assembled purely
----from events drifts, so this reads the map in the background for ever and puts it right.
+---One question to each surface rather than one to each chunk of each surface:
+---find_entities_filtered with no area at all hands back every inserter on a surface in a
+---single call. On a Space Age megabase that is fifty-nine calls against two hundred and
+---twenty-eight thousand, and it is why this can be a single tick rather than a cursor
+---creeping over the map for a minute and a half.
 ---
----Two ways of reading it, and which one a surface gets depends on what the first reading of
----it found. The first time, the surface is crawled: its chunks are asked for one at a time,
----and where they lie is noted. After that the surface is read by blocks -- squares of
----ground taken straight from the rectangle those chunks turned out to fill, with no chunk
----list involved at all. Measured on a megabase, crawling a pass cost about 4.2 seconds of
----which the chunk list itself was nearly half; by blocks it is about 1.6.
----
----A surface whose rectangle is mostly gap is left crawling, which is what WASTE_LIMIT
----decides.
-local function rescan_slice()
-  local state = storage.rescan
-  if state == nil then state = { at = 0, passes = 0 } storage.rescan = state end
-  if state.rect == nil then state.rect = {} end
-  -- quick until the map has been read once, a crawl for ever after
-  local budget = (state.passes or 0) > 0 and IDLE_BUDGET or FIRST_PASS_BUDGET
-
-  local surface = state.surface and game.surfaces[state.surface] or nil
-  if surface == nil or not surface.valid then
-    local next_one = next_surface(state)
-    if next_one == nil then return end
-    surface = next_one
-    begin_surface(state, surface)
-  end
-
-  local left = budget
-  local wraps = 0
-  while left > 0 do
-    local rect = state.rect[state.surface]
-    local finished
-
-    if rect then
-      -- by blocks, straight off the rectangle
-      if state.by == nil then state.bx, state.by = rect.x0, rect.y0 end
-      finished = state.by > rect.y1
-      if not finished then
-        -- Charged by the ground covered rather than by the query, so that the budget goes
-        -- on meaning chunks looked at whichever way they were looked at. The saving is
-        -- taken as time rather than as a faster pass.
-        left = left - (BLOCK * BLOCK) - read_area(surface, block_area(state.bx, state.by))
-        state.bx = state.bx + BLOCK
-        if state.bx > rect.x1 then
-          state.bx = rect.x0
-          state.by = state.by + BLOCK
-        end
-      end
-    else
-      -- crawling, which is also how a surface's rectangle is learnt
-      --
-      -- Made again whenever the iterator is not the one the state describes: after a load,
-      -- or after the surface it was walking went away.
-      if walk == nil or walk.surface ~= state.surface or walk.at ~= state.at then
-        walk = { surface = state.surface, at = 0, iter = surface.get_chunks() }
-        while walk.at < state.at and walk.iter() ~= nil do walk.at = walk.at + 1 end
-        -- and if the surface has shrunk since, carry on from wherever that left off
-        state.at = walk.at
-      end
-      local chunk = walk.iter()
-      finished = chunk == nil
-      if finished then
-        remember_rectangle(state)
-      else
-        walk.at = walk.at + 1
-        state.at = walk.at
-        survey(state, chunk)
-        left = left - 1 - read_area(surface, chunk.area)
-      end
-    end
-
-    if finished then
-      -- that surface is done; on to the next, and round to the first when they run out
-      local next_one, wrapped = next_surface(state)
-      if next_one == nil then break end
-      if wrapped then
-        state.passes = (state.passes or 0) + 1
-        wraps = wraps + 1
-        -- every surface there is holds no chunks at all, so there is nothing to read and
-        -- going round again would only find that out twice
-        if wraps > 1 then break end
-      end
-      surface = next_one
-      begin_surface(state, surface)
-    end
-  end
-end
-
----Stop reading a surface by blocks and crawl it again instead.
----@param state RescanState
----@param index uint
-local function forget_rectangle(state, index)
-  if state.rect == nil or state.rect[index] == nil then return end
-  state.rect[index] = nil
-  if state.surface == index then
-    -- it is the surface being read, so where the blocks had got to means nothing now
-    state.bx, state.by = nil, nil
-    state.at = 0
-    state.survey = nil
-    walk = nil
-  end
-end
-
----Keep a surface's rectangle covering the ground that is really there.
----
----A rectangle is worked out once, by crawling the surface, and used for ever after, so
----ground generated later has to be taken into it or it would never be read again. Which is
----cheap: a chunk being generated is a rare thing beside a chunk being read, and all this
----does is stretch four numbers.
----@param event EventData.on_chunk_generated
-local function onChunkGenerated(event)
-  local state = storage.rescan
-  if state == nil or state.rect == nil then return end
-  local index = event.surface.index
-  local rect = state.rect[index]
-  if rect == nil then return end
-  local at = event.position
-  if at.x < rect.x0 then rect.x0 = at.x end
-  if at.x > rect.x1 then rect.x1 = at.x end
-  if at.y < rect.y0 then rect.y0 = at.y end
-  if at.y > rect.y1 then rect.y1 = at.y end
-  rect.n = rect.n + 1
-  -- A rectangle stretched out of all proportion to the ground inside it is worse than
-  -- reading chunk by chunk, and one chunk generated a long way off -- a journey, an
-  -- outpost, a script having a look round -- can do that in a single event.
-  if not worth_blocks(rect) then forget_rectangle(state, index) end
-end
-
----@param event EventData.on_chunk_deleted
-local function onChunkDeleted(event)
-  -- Ground going away leaves a rectangle too big and its count of what is in it too high,
-  -- and both of those argue for reading ground that is not there any more. Rare enough to
-  -- answer by working the surface out again from the beginning.
-  local state = storage.rescan
-  if state then forget_rectangle(state, event.surface_index) end
-end
-
----@param event EventData.on_surface_cleared|EventData.on_surface_deleted
-local function onSurfaceGone(event)
-  local state = storage.rescan
-  if state then forget_rectangle(state, event.surface_index) end
-end
-
----Forget every inserter and start the reading again from the top.
-local function begin_reading()
+---A long tick, all the same, and it happens at three moments: a new game, an update to
+---this mod, and the tick belt stacking is researched. The first two are a load, where a
+---pause goes unnoticed. The third is a research finishing, where it does not -- but it
+---happens once in a save, and the alternative was several hundred lines of cursor.
+local function read_everything()
   storage.droppers = {}
   storage.busy = {}
   storage.due = {}
   storage.pending = {}
-  -- The rectangles go with it. They describe the map as it was when each surface was last
-  -- crawled, and everything else here is being thrown away precisely because it may not
-  -- describe the map any more.
-  storage.rescan = { at = 0, passes = 0, rect = {} }
-  walk = nil
+  for _, surface in pairs(game.surfaces) do
+    read_area(surface, nil)
+  end
 end
 
 ---@param event EventData.on_tick
 local function onTick(event)
   if not storage.active then return end
   local tick = event.tick
-
-  -- a slice of the map, read again in the background for ever
-  rescan_slice()
 
   -- Everything that was built, turned round, mined or blown up last tick. By now the
   -- engine has settled what each of these inserters is aimed at, which it had not when the
@@ -892,16 +591,12 @@ local function reconsider()
   if active == storage.active then return end
   storage.active = active
   if active then
-    -- begun rather than done: on a megabase reading the whole world in one tick is a five
-    -- second freeze, and a research finishing is no moment to inflict one
-    begin_reading()
+    read_everything()
   else
     storage.droppers = {}
     storage.busy = {}
     storage.due = {}
     storage.pending = {}
-    storage.rescan = nil
-    walk = nil
   end
 end
 
@@ -916,20 +611,15 @@ local function rebuild()
   reconsider()
 end
 
----Read the whole world again, now, however long it takes.
+---Read the whole world again, now.
 ---
----What the mod's own remote interface offers, because somebody who asks for it wants it
----done rather than begun; everything the mod does of its own accord goes the slow way. On a
----factory of any size this is a long tick, which is the price of asking for it.
+---What the mod's own remote interface and its console command offer, and the way out of
+---anything this mod failed to hear about: a script that built an inserter without raising
+---an event, a mod that re-aimed one in a way nothing here knows to listen for. It is the
+---same work the mod does for itself when belt stacking is researched, so it costs the same
+---long tick and no more.
 local function refreshData()
   rebuild()
-  if not storage.active then return end
-  -- Every chunk of every surface at once. On a factory of any size this is a long tick,
-  -- which is the price of asking for it rather than letting the background reading come
-  -- round; the background reading carries on from the top afterwards either way.
-  for _, surface in pairs(game.surfaces) do
-    for chunk in surface.get_chunks() do read_area(surface, chunk.area) end
-  end
 end
 
 ---@param event EventData.on_built_entity|EventData.on_robot_built_entity|EventData.on_player_rotated_entity
@@ -973,7 +663,69 @@ local function onRemoveEntity(event)
   end
 end
 
+--- Mods that re-aim an inserter after it has been built, and the events they say so with.
+---
+--- An inserter's drop position can be moved from a GUI, and several popular mods do it:
+--- swinging one from a chest round to bare ground is exactly the change this mod has to
+--- know about, and writing drop_position raises nothing the game defines. Each mod that
+--- announces it at all does so with an event of its own.
+---
+--- Surveyed rather than guessed at. Of the 111 inserter and loader mods on the portal
+--- built for 2.x with more than two thousand downloads, 56 publish source that could be
+--- read; 15 of those write drop_position or pickup_position, and three of the 15 raise
+--- anything at all when they do. These are those three. The other twelve say nothing
+--- whatever, and neither can anything be said about the 55 whose source is not published,
+--- which between them are why the console command exists.
+---
+--- Two of the three declare a custom-event prototype in their data stage, so the id is
+--- sitting in defines.events by the time this file is read and a name is all that is
+--- needed.
+local ADJUSTERS_BY_PROTOTYPE = {
+  "on_bobs_inserter_adjusted",             -- Bob's Adjustable Inserters
+  "on_qai_inserter_vectors_changed",       -- Quick Adjustable Inserters
+  "on_qai_inserter_direction_changed",
+  "on_qai_inserter_adjustment_finished",
+}
+
+--- And the one whose id is made at run time and handed out by a remote interface.
+---
+--- Asked for on load rather than here, because nothing may be asked of another mod while
+--- this file is still being read. Taking up a handler that depends on which mods are
+--- present is one of the few things on_load is for.
+local ADJUSTERS_BY_INTERFACE = {
+  { mod = "Smart_Inserters", asking = "on_inserter_arm_changed" },
+}
+
+---An inserter somebody has re-aimed.
+---
+---Looked at again next tick, exactly as a newly built one is: where an inserter's items
+---land is settled during the engine's own update and not while the event that moved it is
+---still running.
+---@param event table
+local function onAimed(event)
+  -- Bob's and Smart Inserters call it `entity`; Quick Adjustable Inserters calls it
+  -- `entity` in one of its three and `inserter` in the other two.
+  later(event.entity or event.inserter)
+end
+
+for _, name in pairs(ADJUSTERS_BY_PROTOTYPE) do
+  local id = defines.events[name]
+  if id then script.on_event(id, onAimed) end
+end
+
+---Take up the events whose ids have to be asked for.
+local function listen_for_adjusters()
+  for _, who in pairs(ADJUSTERS_BY_INTERFACE) do
+    local offered = remote.interfaces[who.mod]
+    if offered and offered[who.asking] then
+      script.on_event(remote.call(who.mod, who.asking), onAimed)
+    end
+  end
+end
+
 local function onInit()
+  -- on_load does not run on a new game, so the same taking-up has to happen here
+  listen_for_adjusters()
   storage.droppers = {}
   storage.busy = {}
   storage.due = {}
@@ -988,6 +740,7 @@ local function onConfigurationChanged()
 end
 
 script.on_init(onInit)
+script.on_load(listen_for_adjusters)
 script.on_configuration_changed(onConfigurationChanged)
 
 script.on_event(defines.events.on_built_entity, onPlaceEntity, INSERTERS_ONLY)
@@ -1030,12 +783,6 @@ script.on_event(defines.events.on_pre_ghost_upgraded, onRemoveEntity)
 
 script.on_event(defines.events.on_tick, onTick)
 
--- What ground each surface covers, which is what lets the reading work in blocks rather
--- than off a chunk list. All three are rare next to a tick.
-script.on_event(defines.events.on_chunk_generated, onChunkGenerated)
-script.on_event(defines.events.on_chunk_deleted, onChunkDeleted)
-script.on_event(defines.events.on_surface_cleared, onSurfaceGone)
-script.on_event(defines.events.on_surface_deleted, onSurfaceGone)
 
 -- Whether anybody can stack things at all, looked at about once a second. That is a handful
 -- of attribute reads on a handful of forces, which is the whole cost of having this mod
@@ -1055,7 +802,7 @@ script.on_event(defines.events.on_forces_merged, reconsider)
 ---would let anything holding the reference change what the mod is doing. Useful for asking
 ---a running game why nothing is happening, and it is how the save round trip test sees
 ---across the boundary between two sessions, since a mod's storage is its own.
----@return { active: boolean, passes: integer, watched: integer, busy: integer, pending: integer, blocked: integer, never_in_the_way: string[], never_let_go_of: string[] }
+---@return { active: boolean, watched: integer, busy: integer, pending: integer, listening_for: string[], never_in_the_way: string[], never_let_go_of: string[] }
 local function report()
   local function count(t)
     local n = 0
@@ -1068,14 +815,15 @@ local function report()
   for i = 1, #NEVER_IN_THE_WAY do filtered[i] = NEVER_IN_THE_WAY[i] end
   local blocked = {}
   for i = 1, #NEVER_LET_GO_OF do blocked[i] = NEVER_LET_GO_OF[i] end
+  local heard = {}
+  for i = 1, #ADJUSTERS_BY_PROTOTYPE do heard[i] = ADJUSTERS_BY_PROTOTYPE[i] end
   return {
     active = storage.active or false,
-    passes = storage.rescan and storage.rescan.passes or 0,
     watched = count(storage.droppers),
     busy = count(storage.busy),
     pending = count(storage.pending),
-    -- how many surfaces have been crawled once and are now read by blocks
-    blocked = count(storage.rescan and storage.rescan.rect),
+    -- the events of other mods it has taken up, for re-aiming an inserter
+    listening_for = heard,
     -- What the mod has told the engine not to bother telling it about, kept apart by the
     -- reason it is entitled to say so, since the two claims are checked differently: these
     -- could never have been in an inserter's way at all...
@@ -1123,6 +871,30 @@ remote.add_interface("inserter-ground-stack",
                       {refreshData = refreshData, report = report, about = about}
                     )
 
+-- The same thing without writing Lua, for a player who finds an inserter the mod never
+-- heard about.
+--
+-- Which can happen, and the mod does not pretend otherwise. Everything it knows it was
+-- told, and a script may build an inserter or re-aim one without saying so: raising the
+-- events is a convention rather than a rule, and the flags that raise them are off by
+-- default. This reads the factory again from scratch and puts all of it right.
+--
+-- Deterministic, so it is safe in a game with other people in it: a command typed by one
+-- player runs on every peer, and this does the same work on each.
+commands.add_command("igs-rescan",
+  "Inserter Ground Stack: read the whole factory again, for inserters the mod never heard "
+    .. "about being built or re-aimed. Takes a moment on a large save.",
+  function(event)
+    refreshData()
+    local said = report()
+    local message = said.active
+      and ("inserter-ground-stack: %d inserters put things down on bare ground")
+            :format(said.watched)
+      or "inserter-ground-stack: nobody has researched belt stacking, so there is nothing to do"
+    local player = event.player_index and game.get_player(event.player_index)
+    if player then player.print(message) else log(message) end
+  end)
+
 -- igs-tests is never published, so this can never fire on a player's machine -- which
 -- matters, because the fixtures build inserters and leave items lying on the ground.
 if script.active_mods["factorio-test"] and script.active_mods["igs-tests"] then
@@ -1132,8 +904,8 @@ if script.active_mods["factorio-test"] and script.active_mods["igs-tests"] then
     "test.ft.limits",
     "test.ft.lifecycle",
     "test.ft.removals",
+    "test.ft.aiming",
     "test.ft.rails",
-    "test.ft.reading",
     "test.ft.ghosts",
     "test.ft.platforms",
     "test.ft.aquilo",

@@ -18,23 +18,28 @@ end)
 after_each(world.clear)
 
 describe("an inserter the mod never saw being built", function()
-  it("is found by the reading that goes round the map anyway", function()
-    -- A script may build an inserter and raise nothing, which is allowed and which mods do.
-    -- Nothing tells this mod about such a one, so what finds it is the background reading
-    -- coming past its chunk. That is the whole reason the reading never stops.
+  it("is not found, because nothing ever told the mod it was there", function()
+    -- A script may build an inserter and raise nothing: raise_built is off unless the
+    -- script asks for it, so silence is the default rather than the exception. Everything
+    -- this mod knows it was told, and nothing reads the map in the background any more, so
+    -- one built this way is simply not known about.
+    --
+    -- Pinned rather than papered over. What such an inserter loses is the mod's help: it
+    -- goes on jamming on its own pile exactly as it would with the mod not installed, and
+    -- nothing is broken but the improvement.
     world.stacking(3)
     local inserter = world.rig(1, { quiet = true })
-    after_ticks(world.SETTLE * 6, function()
-      assert.is_not_nil(storage.droppers[inserter.unit_number],
-        "the reading went round the map and never found it")
-    end)
-    after_ticks(world.SETTLE * 8, function()
-      assert.is_true(world.piled(inserter) > 1,
-        "it was found but never topped up")
+    after_ticks(world.SETTLE, function()
+      assert.is_nil(storage.droppers[inserter.unit_number],
+        "something told the mod about an inserter that was built in silence")
+      assert.are.equal(1, world.piled(inserter),
+        ("%d items on the ground: it is being helped after all"):format(
+          world.piled(inserter)))
     end)
   end)
 
   it("is found at once when the mod is asked to read the world again", function()
+    -- Which is the way out, and the reason the remote and the console command exist.
     world.stacking(3)
     local inserter = world.rig(1, { quiet = true })
     world.refresh()
@@ -289,24 +294,28 @@ describe("a surface that is deleted", function()
     end)
   end)
 
-  it("does not stop the reading of the map", function()
-    -- The reading keeps where it had got to as a surface index and a count of chunks. If
-    -- the surface it was walking is deleted underneath it, it has to pick up on another one
-    -- rather than sit there for ever, or everything the reading is the backstop for stops
-    -- being caught.
+  it("does not take the mod down with it", function()
+    -- A surface being deleted used to matter a great deal, because the reading kept where
+    -- it had got to as a surface index and would have sat on a dead one for ever. Nothing
+    -- keeps a place any more, so what is left to check is the plain thing: the mod carries
+    -- on, and an inserter built afterwards on another surface is still picked up.
     world.stacking(3)
     world.capacity(3)
     doomed = make_doomed()
     world.rig_on(doomed, { x = 0.5, y = 0.5 })
-    local rounds
+    local later_on
     after_ticks(60, function()
-      rounds = storage.rescan.passes
       game.delete_surface("igs-doomed")
     end)
-    after_ticks(300, function()
-      assert.is_true(storage.rescan.passes > rounds,
-        ("the reading has been round %d times and was %d when the surface went: it stopped")
-          :format(storage.rescan.passes, rounds))
+    after_ticks(180, function()
+      later_on = world.rig(2)
+    end)
+    after_ticks(180 + world.SETTLE, function()
+      assert.is_not_nil(storage.droppers[later_on.unit_number],
+        "an inserter built after a surface was deleted was never heard about")
+      assert.is_true(world.piled(later_on) > 1,
+        ("only %d items on the ground: the mod stopped when the surface went"):format(
+          world.piled(later_on)))
     end)
   end)
 

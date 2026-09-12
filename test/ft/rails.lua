@@ -136,42 +136,50 @@ describe("an inserter whose rail is taken away", function()
     end)
   end)
 
-  it("is found again even when the rail goes with nothing announced at all", function()
-    -- The events cover a player mining, a robot mining, a thing dying and a script that
+  it("is not found again when the rail goes with nothing announced at all", function()
+    -- The events cover a player mining, a robot mining, a thing dying, and a script that
     -- says what it did. What they do not cover is a script that takes a rail away and
-    -- raises nothing, which is allowed and which some mods do. Nothing local tells this mod
-    -- anything, so the only thing that can put it right is the background reading of the
-    -- map coming round again. This is the test that the backstop is real.
+    -- raises nothing, which is allowed and which the flags default to: raise_destroy is
+    -- off unless a mod asks for it.
+    --
+    -- There is no longer anything reading the map in the background, so nothing puts that
+    -- right on its own, and this pins the gap rather than hiding it. What the inserter
+    -- loses is the mod's help; it goes on behaving exactly as it would with the mod not
+    -- installed. Asking for the world to be read again is the way out, and the second half
+    -- of this checks that it is a way out.
     world.stacking(3)
     world.capacity(3)
     local inserter = world.rig(1)
     local rails = rail_under(inserter)
-    local rounds
     after_ticks(world.SETTLE, function()
       assert.is_nil(storage.droppers[inserter.unit_number],
-        "it was never let go of, so finding it again proves nothing")
+        "it was never let go of, so none of this proves anything")
       for _, rail in pairs(rails) do
         -- no raise_destroy: as far as every event goes, this never happened
         if rail.valid then rail.destroy() end
       end
-      -- Nothing queued this inserter to be looked at again, because nothing was announced.
-      -- Whatever finds it now is the reading and not an event.
       assert.is_nil(storage.pending[inserter.unit_number],
         "a removal that raised no event queued the inserter anyway")
-      rounds = storage.rescan.passes
     end)
     after_ticks(world.SETTLE + 120, function()
-      -- and the reading really did come past in between, rather than the inserter turning
-      -- up on the list by some other road
-      assert.is_true(storage.rescan.passes > rounds,
-        ("the reading has been round %d times and was %d when the rail went, so it never "
-          .. "came past"):format(storage.rescan.passes, rounds))
+      assert.is_nil(storage.droppers[inserter.unit_number],
+        "something found it, so this is not the gap it is meant to describe")
+      -- One item, which is the game without this mod: the inserter swings once, finds the
+      -- spot taken by what it put there, and stops. Not zero -- the rail is gone, so it
+      -- can put something down now -- and not a pile, which is what being helped looks
+      -- like.
+      assert.are.equal(1, world.piled(inserter),
+        ("%d items on the ground: it is being helped, so it was found after all"):format(
+          world.piled(inserter)))
+      -- and here is the way out
+      world.refresh()
       assert.is_not_nil(storage.droppers[inserter.unit_number],
-        "the rail went without a word and the reading never noticed")
+        "reading the world again did not find an inserter whose rail had gone")
     end)
-    after_ticks(world.SETTLE * 2 + 60, function()
+    after_ticks(world.SETTLE + 120 + world.SETTLE, function()
       assert.is_true(world.piled(inserter) > 1,
-        "it was found again but never topped up")
+        ("only %d items on the ground once it had been found again"):format(
+          world.piled(inserter)))
     end)
   end)
 end)

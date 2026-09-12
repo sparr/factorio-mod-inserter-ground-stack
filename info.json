@@ -8,7 +8,10 @@
   "description": "Inserters make stacks on the ground instead of just single items, after researching belt stacking.",
   "factorio_version": "2.1",
   "dependencies": [
-    "base >= 2.1.0"
+    "base >= 2.1.0",
+    "? bobinserters",
+    "? quick-adjustable-inserters",
+    "? Smart_Inserters"
   ],
   "package": {
     "ignore": [
