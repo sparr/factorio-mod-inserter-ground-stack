@@ -25,12 +25,24 @@ after_each(world.clear)
 ---@param inner string
 ---@return LuaEntity
 local function ghost_at(inserter, inner)
+  local surface = world.surface()
   local drop = inserter.drop_position
-  local ghost = world.surface().create_entity{
+  local ghost = surface.create_entity{
     name = "entity-ghost", inner_name = inner,
     position = { math.floor(drop.x) + 0.5, math.floor(drop.y) + 0.5 },
     force = "player", raise_built = true }
   assert.is_not_nil(ghost, "could not put a ghost down in front of the inserter")
+  -- And it has to actually cover the spot the inserter aims at. Placing a thing on the
+  -- middle of the right tile is not the same as covering a point three quarters of the way
+  -- across it, and a fixture that misses is a fixture that tests bare ground while looking
+  -- exactly like one that tests a ghost.
+  local covers = false
+  for _, thing in pairs(surface.find_entities_filtered{ position = drop }) do
+    if thing.valid and thing.type == "entity-ghost" then covers = true end
+  end
+  assert.is_true(covers,
+    ("the %s ghost does not cover %.2f,%.2f, where the inserter aims"):format(
+      inner, drop.x, drop.y))
   return ghost--[[@as LuaEntity]]
 end
 
@@ -48,6 +60,31 @@ describe("an inserter aimed at the ghost of something that takes items", functio
       assert.is_nil(storage.droppers[inserter.unit_number],
         "an inserter waiting on a ghost is being watched")
       assert.are.equal(0, world.piled(inserter), "it put something down on the ghost")
+    end)
+  end)
+
+  it("blocks even an item the finished thing could never accept", function()
+    -- Whether a ghost is in the way turns on the thing having an item inventory at all, not
+    -- on whether this particular item could go into it. A gun turret takes ammunition and
+    -- nothing else, and its ghost still stops an inserter carrying iron plates dead.
+    --
+    -- This is worth pinning because the whole of watch() rests on it: an inserter with a
+    -- drop target is left off the list on the understanding that it will never put anything
+    -- on the ground. If blocking were decided by the item, an inserter holding the wrong one
+    -- would have a drop target and be dropping on the ground at the same time, and the mod
+    -- would quietly never help it.
+    world.stacking(3)
+    world.capacity(3)
+    local inserter = world.rig(1, { item = "iron-plate" })
+    ghost_at(inserter, "gun-turret")
+    after_ticks(world.SETTLE, function()
+      assert.are.equal(defines.entity_status.waiting_for_target_to_be_built, inserter.status,
+        "a gun turret ghost let an inserter carrying plates get on with it")
+      assert.is_not_nil(inserter.drop_target)
+      assert.are.equal(0, world.piled(inserter),
+        "iron plates landed in front of a gun turret ghost")
+      assert.is_nil(storage.droppers[inserter.unit_number],
+        "it is being watched even though it has a drop target")
     end)
   end)
 
@@ -121,18 +158,20 @@ end)
 
 describe("an inserter aimed at the ghost of something that does not take items", function()
   it("puts things on the ground as if the ghost were not there", function()
-    -- A power pole ghost is not a drop target: the inserter aims through it at the ground,
-    -- and this mod treats it like any other bare spot.
+    -- A wall has no inventory of any kind, so its ghost is not a drop target: the inserter
+    -- aims through it at the ground and this mod treats it like any other bare spot. A wall
+    -- rather than a power pole because a wall fills its tile, and a pole's collision box is
+    -- too small to cover the spot an inserter actually aims at.
     world.stacking(3)
     world.capacity(3)
     local inserter = world.rig(1)
-    ghost_at(inserter, "medium-electric-pole")
+    ghost_at(inserter, "stone-wall")
     after_ticks(world.SETTLE, function()
-      assert.is_nil(inserter.drop_target, "a pole ghost became a drop target")
+      assert.is_nil(inserter.drop_target, "a wall ghost became a drop target")
       assert.is_not_nil(storage.droppers[inserter.unit_number],
-        "an inserter putting things on the ground beneath a pole ghost is not watched")
+        "an inserter putting things on the ground under a wall ghost is not watched")
       assert.is_true(world.piled(inserter) > 1,
-        ("only %d items on the ground under a pole ghost"):format(world.piled(inserter)))
+        ("only %d items on the ground under a wall ghost"):format(world.piled(inserter)))
     end)
   end)
 end)
