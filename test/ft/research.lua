@@ -141,3 +141,65 @@ describe("research being taken away again", function()
     end)
   end)
 end)
+
+describe("two forces at different points in the tech tree", function()
+  -- Whether the mod runs at all is settled for the game as a whole: it starts watching the
+  -- moment anybody has belt stacking, because the list has to exist before it can be used
+  -- and there is no sense keeping one per force. Whether an inserter is actually helped is
+  -- settled for its own force, every time it is looked at.
+  --
+  -- Which means an inserter belonging to a force that has not researched it is carried on
+  -- the list and never touched -- and starts working on the next sweep the moment that
+  -- force does research it, with nothing re-read and nothing told to the mod.
+  it("helps only the inserters of the force that researched it", function()
+    local them = game.forces["igs-other"] or game.create_force("igs-other")
+    them.belt_stack_size_bonus = 0
+    world.stacking(3)
+    world.capacity(3)
+    local mine = world.rig(1)
+    -- Far enough out to have its own ground, and self-powered: an electric network belongs
+    -- to a force, so the arena's substation is no use to anybody else.
+    local theirs = world.rig_on(world.surface(), world.at(0, 12), { force = "igs-other" })
+
+    after_ticks(world.SETTLE, function()
+      assert.is_true(world.piled(mine) > 1,
+        ("only %d items for the force that did research it"):format(world.piled(mine)))
+      -- one item, which is the game without this mod: swing, find the spot taken, stop
+      assert.are.equal(1, world.loose_on(world.surface(), theirs.drop_position, 1),
+        "an inserter of a force without belt stacking was helped anyway")
+      assert.is_not_nil(storage.droppers[theirs.unit_number],
+        "it is not even being watched, so it could not start when the research lands")
+      -- and now they research it, with nothing whatever told to the mod
+      them.belt_stack_size_bonus = 3
+      them.bulk_inserter_capacity_bonus = 3
+    end)
+
+    after_ticks(world.SETTLE * 2, function()
+      local piled = world.loose_on(world.surface(), theirs.drop_position, 1)
+      assert.is_true(piled > 1,
+        ("only %d items after that force researched belt stacking: the gate is being read "
+          .. "once and remembered, not asked each time"):format(piled))
+    end)
+  end)
+
+  it("stops when the last force with it loses it", function()
+    -- The other end of the same rule. Switching off is for the game as a whole, so it only
+    -- happens once nobody at all has the research.
+    local them = game.forces["igs-other"] or game.create_force("igs-other")
+    world.stacking(3)
+    them.belt_stack_size_bonus = 3
+    after_ticks(30, function()
+      assert.is_true(remote.call("inserter-ground-stack", "report").active)
+      game.forces.player.belt_stack_size_bonus = 0
+    end)
+    after_ticks(30 + 90, function()
+      assert.is_true(remote.call("inserter-ground-stack", "report").active,
+        "the mod switched off while another force still had belt stacking")
+      them.belt_stack_size_bonus = 0
+    end)
+    after_ticks(30 + 90 + 90, function()
+      assert.is_false(remote.call("inserter-ground-stack", "report").active,
+        "nobody has belt stacking and the mod is still running")
+    end)
+  end)
+end)

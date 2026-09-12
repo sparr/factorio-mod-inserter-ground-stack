@@ -103,14 +103,18 @@ end
 ---coordinates, so a fixture standing on one brings its own supply.
 ---@param surface LuaSurface
 ---@param at MapPosition where the inserter goes; it takes from the west and puts down east
----@param opts { item: string?, count: integer?, inserter: string? }?
+---@param opts { item: string?, count: integer?, inserter: string?, force: string? }?
 ---@return LuaEntity inserter
 ---@return LuaEntity chest
 function world.rig_on(surface, at, opts)
   opts = opts or {}
+  -- Whose factory this is. It matters more than it looks: an electric network belongs to a
+  -- force, so a fixture built for anyone but the player cannot draw on the arena's
+  -- substation and has to bring the interface and substation below along with it.
+  local force = opts.force or "player"
   local function put(name, dx, dy, direction)
     return surface.create_entity{ name = name, position = { at.x + dx, at.y + dy },
-      direction = direction or defines.direction.north, force = "player", raise_built = true }
+      direction = direction or defines.direction.north, force = force, raise_built = true }
   end
   local interface = put("electric-energy-interface", -6, 0)
   assert.is_not_nil(interface, "no power interface")
@@ -250,8 +254,13 @@ function world.clear()
   end
   local player = game.players[1]
   if player and world.home then player.teleport(world.home) end
-  world.stacking_quietly(0)
-  world.capacity(0)
+  -- Every force, not just the player's: a test that gives a second force the research
+  -- would otherwise leave the mod switched on for every test after it, since it is switched
+  -- on by anybody at all having belt stacking.
+  for _, force in pairs(game.forces) do
+    force.belt_stack_size_bonus = 0
+    force.bulk_inserter_capacity_bonus = 0
+  end
   -- and tell the mod, so its list does not keep pointing at what has gone
   world.refresh()
 end
