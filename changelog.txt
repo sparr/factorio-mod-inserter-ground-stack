@@ -1,6 +1,6 @@
 ---------------------------------------------------------------------------------------------------
 Version: 0.1.0
-Date: 2026-09-11
+Date: 2026-09-12
   Features:
     - An inserter putting something down where a stack of the same thing is already lying adds to that stack instead of stopping on it
     - A bulk inserter empties its whole hand onto the ground rather than leaving all but the first item in it
