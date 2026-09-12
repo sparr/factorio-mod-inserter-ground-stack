@@ -7,5 +7,6 @@ Date: 2026-09-11
     - Ground stacks grow to the same depth the item stacks anywhere else, so a tile holds a hundred iron plates or ten barrels
     - Eggs and anything else that hatches when it spoils are left alone, since a pile of them going off at once is a bigger bang than the game would ever have arranged
     - Nothing happens until belt stacking has been researched
-    - Reading the factory when the research lands is spread over many ticks, so a large save carries on running rather than freezing for several seconds
+    - Works with Bob's Adjustable Inserters, Quick Adjustable Inserters and Smart Inserters: an inserter re-aimed onto bare ground is picked up at once
+    - /igs-rescan reads the whole factory again, for an inserter built or re-aimed by a mod that announced nothing
     - Inserters aimed at rail, or at a ghost of something that takes items, are not watched, since neither can be put down on; they are picked up again when the rail or the ghost goes
