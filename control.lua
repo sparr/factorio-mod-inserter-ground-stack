@@ -98,12 +98,80 @@ local VEHICLES = {
 --- the moment the ground becomes fair game.
 local STAND_INS = { ["entity-ghost"] = true }
 
---- Things that come and go in their thousands: a forest burning, a field on Gleba being
---- harvested. An item cannot be put down on a tree, so one of them is in an inserter's way
---- while it stands there, but an inserter aimed at a tree is still watched the whole time --
---- nothing about a tree makes the mod let go of it -- so there is nothing to re-find and no
---- reason to search the neighbourhood every time one falls.
-local GROWTH = { tree = true, plant = true }
+--- Kinds of thing that can never have been in an inserter's way, turned away at the
+--- engine's door rather than in this mod's own code.
+---
+--- An entity being removed costs something before a line of Lua runs: the engine builds the
+--- event and hands over an object for the entity, once for every mod listening. That is
+--- paid whatever the answer turns out to be, and on a busy map the answer is nearly always
+--- no. Measured on a Space Age megabase, 170,984 of the 171,004 entities that died in a
+--- thousand ticks were asteroids, shot off the bows of platforms in flight, and this mod
+--- threw away every one of them. Naming them in the event filter means they are never
+--- offered in the first place.
+---
+--- A filter is fixed when the mod is loaded, so it is only safe where the type settles the
+--- question on its own, without asking the prototype:
+---
+--- An asteroid is not a building, cannot be the thing an inserter was loading, and shares
+--- no collision layer with an item lying on the ground -- checked on all sixteen asteroid
+--- prototypes in Space Age, every one of them is_building = false with nothing in common
+--- with an item's mask.
+---
+--- Trees and plants come and go in their thousands as well: a forest burning, a field on
+--- Gleba being harvested. An item cannot be put down on a tree, so one is in an inserter's
+--- way while it stands there, but an inserter aimed at a tree is watched the whole time it
+--- stands there -- nothing about a tree makes the mod let go of it -- so there is nothing
+--- to re-find when it falls.
+---
+--- A unit is a biter or a pentapod. Nothing puts items into one, nothing is stopped from
+--- putting an item down by one, and on a map under attack they die in great numbers.
+local NEVER_IN_THE_WAY = { "asteroid", "unit" }
+
+--- And the kinds that are in the way, but whose going still tells this mod nothing.
+---
+--- A tree does block an item from being put down -- it shares the is_lower_object layer
+--- with an item lying on the ground, which the first draft of this got wrong -- and so does
+--- a plant. But blocking is only half of what makes a removal worth hearing. The other half
+--- is whether the inserter was let go of while the thing stood there, and an inserter aimed
+--- at a tree never is: it has no drop target and it is not waiting for a train, so it stays
+--- on the list the whole time, jammed, being offered a pile that is not there yet. The
+--- moment the tree falls it puts something down and the mod picks up from there, without
+--- anyone having had to tell it.
+---
+--- Which is worth filtering because they come and go in their thousands: a forest burning,
+--- a field on Gleba being harvested by agricultural towers.
+local NEVER_LET_GO_OF = { "plant", "tree" }
+
+--- Both lists at once, to ask about one entity at a time.
+---
+--- Nothing on either should ever reach here, since the filter means the events never
+--- arrive. It is kept anyway: a filter that quietly stopped applying -- a new version of
+--- the game, a type renamed -- should cost this mod a little time rather than its
+--- correctness.
+local not_worth_hearing = {}
+for _, kind in pairs(NEVER_IN_THE_WAY) do not_worth_hearing[kind] = true end
+for _, kind in pairs(NEVER_LET_GO_OF) do not_worth_hearing[kind] = true end
+
+--- And both in the shape the engine wants them: any of these, no thank you.
+---
+--- `invert` on each and `and` between them, which reads as none of them rather than not all
+--- of them. The mode on the first is ignored, and giving them all the same one saves a
+--- reader wondering whether the order matters.
+local WORTH_HEARING = {}
+for _, list in pairs({ NEVER_IN_THE_WAY, NEVER_LET_GO_OF }) do
+  for i = 1, #list do
+    WORTH_HEARING[#WORTH_HEARING + 1] = { filter = "type", type = list[i],
+                                          invert = true, mode = "and" }
+  end
+end
+
+--- What the mod wants to hear when something is built: only that it was an inserter.
+---
+--- This takes nothing away. Building a chest in front of an inserter has never brought that
+--- inserter through here -- it is noticed the next time the inserter itself is looked at
+--- and found to have a drop target -- and later() already refuses everything that is not an
+--- inserter. The filter is the same refusal, made before the event is built.
+local INSERTERS_ONLY = { { filter = "type", type = "inserter" } }
 
 --- Whether taking this away could change where an inserter's items land, remembered by
 --- prototype name.
@@ -616,7 +684,7 @@ local function onRemoveEntity(event)
   local worth_a_look = matters_when_gone[name]
   if worth_a_look == nil then
     local kind = entity.type
-    if GROWTH[kind] then
+    if not_worth_hearing[kind] then
       worth_a_look = false
     elseif STAND_INS[kind] or VEHICLES[kind] then
       worth_a_look = true
@@ -667,35 +735,41 @@ end
 script.on_init(onInit)
 script.on_configuration_changed(onConfigurationChanged)
 
-script.on_event(defines.events.on_built_entity, onPlaceEntity)
-script.on_event(defines.events.on_robot_built_entity, onPlaceEntity)
-script.on_event(defines.events.on_space_platform_built_entity, onPlaceEntity)
+script.on_event(defines.events.on_built_entity, onPlaceEntity, INSERTERS_ONLY)
+script.on_event(defines.events.on_robot_built_entity, onPlaceEntity, INSERTERS_ONLY)
+script.on_event(defines.events.on_space_platform_built_entity, onPlaceEntity, INSERTERS_ONLY)
 
 -- an inserter another mod put down or revived from a ghost is as real as one a player
 -- built, and these are how a script says it has done so
-script.on_event(defines.events.script_raised_built, onPlaceEntity)
-script.on_event(defines.events.script_raised_revive, onPlaceEntity)
-script.on_event(defines.events.on_entity_cloned, function(event) later(event.destination) end)
+script.on_event(defines.events.script_raised_built, onPlaceEntity, INSERTERS_ONLY)
+script.on_event(defines.events.script_raised_revive, onPlaceEntity, INSERTERS_ONLY)
+script.on_event(defines.events.on_entity_cloned,
+                function(event) later(event.destination) end, INSERTERS_ONLY)
 
--- turning an inserter round, or pasting settings onto one, moves where its items land
+-- Turning an inserter round, or pasting settings onto one, moves where its items land.
+-- Neither of these takes a filter, so later() does the refusing; both are a player's own
+-- doing and arrive a handful at a time rather than in their thousands.
 script.on_event(defines.events.on_player_rotated_entity, onPlaceEntity)
 script.on_event(defines.events.on_entity_settings_pasted, function(event) later(event.destination) end)
 
 -- and a teleported inserter takes its drop position with it, but not what was standing
 -- under it
-script.on_event(defines.events.script_raised_teleported, onPlaceEntity)
+script.on_event(defines.events.script_raised_teleported, onPlaceEntity, INSERTERS_ONLY)
 
 -- Before removal rather than after, because the entity has to still be there to be asked
 -- where it stood and how big it was. What is done about it waits for the next tick, by
 -- which time it is gone.
-script.on_event(defines.events.on_pre_player_mined_item, onRemoveEntity)
-script.on_event(defines.events.on_robot_pre_mined, onRemoveEntity)
-script.on_event(defines.events.on_space_platform_pre_mined, onRemoveEntity)
-script.on_event(defines.events.on_entity_died, onRemoveEntity)
-script.on_event(defines.events.script_raised_destroy, onRemoveEntity)
+script.on_event(defines.events.on_pre_player_mined_item, onRemoveEntity, WORTH_HEARING)
+script.on_event(defines.events.on_robot_pre_mined, onRemoveEntity, WORTH_HEARING)
+script.on_event(defines.events.on_space_platform_pre_mined, onRemoveEntity, WORTH_HEARING)
+script.on_event(defines.events.on_entity_died, onRemoveEntity, WORTH_HEARING)
+script.on_event(defines.events.script_raised_destroy, onRemoveEntity, WORTH_HEARING)
 
 -- A ghost is not mined and does not die; cancelling one has events of its own, and they
--- name the thing `ghost` rather than `entity`.
+-- name the thing `ghost` rather than `entity`. Unfiltered, because a ghost's own type is
+-- `entity-ghost` whatever it stands for, so the list above would say nothing about it, and
+-- because cancelling ghosts is something a player does rather than something a map does
+-- every tick.
 script.on_event(defines.events.on_pre_ghost_deconstructed, onRemoveEntity)
 script.on_event(defines.events.on_pre_ghost_upgraded, onRemoveEntity)
 
@@ -719,19 +793,32 @@ script.on_event(defines.events.on_forces_merged, reconsider)
 ---would let anything holding the reference change what the mod is doing. Useful for asking
 ---a running game why nothing is happening, and it is how the save round trip test sees
 ---across the boundary between two sessions, since a mod's storage is its own.
----@return { active: boolean, passes: integer, watched: integer, busy: integer, pending: integer }
+---@return { active: boolean, passes: integer, watched: integer, busy: integer, pending: integer, never_in_the_way: string[], never_let_go_of: string[] }
 local function report()
   local function count(t)
     local n = 0
     for _ in pairs(t or {}) do n = n + 1 end
     return n
   end
+  -- Copied rather than handed over, for the same reason as the rest: what comes back here
+  -- is an answer, not a handle on the mod's own furniture.
+  local filtered = {}
+  for i = 1, #NEVER_IN_THE_WAY do filtered[i] = NEVER_IN_THE_WAY[i] end
+  local blocked = {}
+  for i = 1, #NEVER_LET_GO_OF do blocked[i] = NEVER_LET_GO_OF[i] end
   return {
     active = storage.active or false,
     passes = storage.rescan and storage.rescan.passes or 0,
     watched = count(storage.droppers),
     busy = count(storage.busy),
     pending = count(storage.pending),
+    -- What the mod has told the engine not to bother telling it about, kept apart by the
+    -- reason it is entitled to say so, since the two claims are checked differently: these
+    -- could never have been in an inserter's way at all...
+    never_in_the_way = filtered,
+    -- ...and these could, but an inserter they stop is never let go of, so there is nothing
+    -- to find again when they go
+    never_let_go_of = blocked,
   }
 end
 

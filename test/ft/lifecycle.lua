@@ -308,3 +308,100 @@ describe("the list", function()
     end)
   end)
 end)
+
+describe("the removals the mod asks the engine not to tell it about", function()
+  -- Every removal event is registered with a filter naming a few kinds of thing that are
+  -- never worth looking at, so that a map full of them -- asteroids off the bows of
+  -- platforms, a forest on fire, a wave of biters -- does not pay to cross into Lua only to
+  -- be thrown away. A filter is fixed when the mod loads, so nothing at runtime can notice
+  -- if what entitles it stops being true, which is what these two check.
+  --
+  -- Two checks rather than one because there are two different entitlements, and the first
+  -- draft of this ran them together and was wrong about trees.
+  it("could not have been in an inserter's way, for the ones filtered on that", function()
+    -- Two prototype facts, asked of the game as it stands rather than of what was true when
+    -- the list was written: none of them is a building, so none could have been catching an
+    -- inserter's items, and none shares a collision layer with an item lying on the ground,
+    -- so none could have been stopping an item from being put down.
+    local kinds = {}
+    for _, kind in pairs(remote.call("inserter-ground-stack", "report").never_in_the_way) do
+      kinds[kind] = true
+    end
+    assert.is_true(next(kinds) ~= nil, "the mod says it filters nothing out on those grounds")
+
+    local blocking = prototypes.entity["item-on-ground"].collision_mask.layers
+    local checked = 0
+    for name, proto in pairs(prototypes.entity) do
+      if kinds[proto.type] then
+        checked = checked + 1
+        assert.is_not_true(proto.is_building,
+          ("%s is a building now, so an inserter could have been loading one and the "
+            .. "filter is losing that"):format(name))
+        for layer in pairs(proto.collision_mask.layers) do
+          assert.is_nil(blocking[layer],
+            ("%s now blocks an item from being put down, on the %s layer, so one of them "
+              .. "going away can matter and the filter is losing that"):format(name, layer))
+        end
+      end
+    end
+    assert.is_true(checked > 0,
+      "not one of those kinds has a prototype in this game, so this checked nothing")
+  end)
+
+  it("leave an inserter they stop still on the list, for the ones filtered on that",
+     function()
+    -- The other entitlement, and the one that cannot be read off a prototype. A tree does
+    -- stop an inserter putting something down. What makes the removal not worth hearing is
+    -- that the inserter is never let go of while the tree stands there, so nothing has to
+    -- find it again when the tree falls -- it simply starts working.
+    --
+    -- Checked on a real tree in a real inserter's way, with the mod told nothing: the
+    -- filter means the event never arrives, so if the reasoning were wrong this inserter
+    -- would sit there for ever.
+    local kinds = remote.call("inserter-ground-stack", "report").never_let_go_of
+    assert.is_true(#kinds > 0, "the mod says it filters nothing out on those grounds")
+    local growth
+    for _, kind in pairs(kinds) do
+      for name, proto in pairs(prototypes.entity) do
+        if proto.type == kind and growth == nil and proto.collision_box then growth = name end
+      end
+    end
+    assert.is_not_nil(growth, "this game has no tree or plant to stand in the way")
+
+    world.stacking(3)
+    world.capacity(3)
+    local inserter = world.rig(1)
+    local surface = world.surface()
+    local drop = inserter.drop_position
+    -- Exactly where it aims, not the middle of the tile: a tree is small and a fixture that
+    -- misses tests bare ground while looking like it tests a tree.
+    local tree = surface.create_entity{ name = growth, position = drop, force = "neutral",
+                                        raise_built = true }
+    assert.is_not_nil(tree, ("could not put a %s in the way"):format(growth))
+    local covers = false
+    for _, thing in pairs(surface.find_entities_filtered{ position = drop }) do
+      if thing.valid and thing == tree then covers = true end
+    end
+    assert.is_true(covers,
+      ("the %s does not cover %.2f,%.2f, where the inserter aims"):format(
+        growth, drop.x, drop.y))
+
+    after_ticks(world.SETTLE, function()
+      assert.are.equal(0, world.piled(inserter),
+        ("items landed under a %s, so it was never in the way and this proves nothing")
+          :format(growth))
+      assert.is_not_nil(storage.droppers[inserter.unit_number],
+        ("an inserter stopped by a %s was let go of, so its going does need hearing about")
+          :format(growth))
+      tree.destroy{ raise_destroy = true }
+      assert.is_nil(storage.pending[inserter.unit_number],
+        ("a %s going raised something the mod acted on, so the filter is not applying and "
+          .. "this proves nothing"):format(growth))
+    end)
+    after_ticks(world.SETTLE * 2, function()
+      assert.is_true(world.piled(inserter) > 1,
+        ("only %d items on the ground once the %s was gone: the mod never picked it back up")
+          :format(world.piled(inserter), growth))
+    end)
+  end)
+end)
